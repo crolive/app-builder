@@ -1,0 +1,16 @@
+{
+  "name": "todo-tracker",
+  "version": "1.0.0",
+  "description": "A lightweight command-line task manager for developers",
+  "main": "index.js",
+  "bin": {
+    "todo": "./index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "commander": "^11.0.0"
+  },
+  "license": "MIT"
+}

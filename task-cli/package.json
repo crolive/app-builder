@@ -1,0 +1,13 @@
+{
+  "name": "task-cli",
+  "version": "1.0.0",
+  "description": "A command-line tool for managing a personal task list without leaving the terminal.",
+  "bin": {
+    "task": "./bin/task.js"
+  },
+  "main": "src/cli.js",
+  "scripts": {
+    "test": "node --test"
+  },
+  "license": "MIT"
+}
