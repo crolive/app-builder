@@ -1,0 +1,8 @@
+- [x] Delete manual workouts — allow a user to delete a manual entry they own (v1 only supports add/edit) (completed 2026-08-26)
+- [ ] Average pace — add average pace as an additional leaderboard metric beyond total time, distance, and activity count; also display pace on individual feed cards
+- [ ] Admin UI for allowlist management — in-app UI to add/remove allowlisted athlete IDs instead of direct database edits
+- [ ] Per-user timezone display — show leaderboard time-window boundaries in each viewer's local timezone instead of one app-wide `APP_TIMEZONE`
+- [ ] Filter feed by activity type — add a type filter (Run, Ride, Lift, etc.) to the activity feed; likely needs a redesign of the filter row above the feed since it already hosts the person filter
+- [ ] Feed/leaderboard start from today forward — only show activities dated today or later in the feed and leaderboard, not historical ones from before "now"; this is a display cutoff only, existing/past activity data is not deleted or excluded from storage. Applies to leaderboard stats too, including the "all-time" window — "all-time" means all-time-from-today-forward, not literally all historical data
+- [ ] Link feed cards to Strava — clicking a `source = strava` activity card in the feed opens that activity on Strava's own site (manual entries have no Strava page to link to)
+- [ ] Comments and reactions on feed activities — let group members leave simple comments and/or reactions (e.g. emoji/kudos) on feed activities

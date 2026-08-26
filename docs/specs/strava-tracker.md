@@ -207,3 +207,123 @@ strava-tracker is a web app for a small, invite-only group of friends (2–4 peo
 - Manual workout entry supports create and edit only — no delete function is in scope for this build.
 - The manual-entry "type" field is restricted to a fixed list (Run, Ride, Walk, Hike, Swim, Weight Training, Yoga, Other); Strava-sourced activities retain whatever type/sport-type string Strava's API returns, unrestricted by this list.
 - Elevation gain, average pace, and any leaderboard metric beyond total time/total distance/activity count are out of scope and must not be added.
+
+## Feature: Delete Manual Workouts (added 2026-08-26)
+
+## Purpose
+Logged-in users of strava-tracker currently have no way to remove a manual workout entry once created — a typo, duplicate, or accidental add is permanent. This feature adds a "Delete" action to the existing manual-entry edit modal so a user can permanently remove a manual workout they own, without leaving the modal or introducing any new screen. Success looks like: a user can delete a bad manual entry in two clicks from the edit modal, the deletion is immediate and permanent, and no other user's data or Strava-sourced data can ever be deleted through this path.
+
+## Fits Into Existing System
+This feature extends two existing pieces of the strava-tracker codebase and touches no others:
+- `src/app/api/activities/[id]/route.ts`, which today exports only `PATCH` (edit a manual activity). This feature adds a `DELETE` export to the same file, reusing the exact session-check and ownership/source-check pattern `PATCH` already uses.
+- `src/components/ManualEntryModal.tsx`, the single bottom-sheet modal component that already handles both add and edit of manual entries via its `editingActivity: PublicActivity | null` prop. This feature adds a Delete affordance to that modal's existing footer, active only in edit mode.
+
+It follows existing conventions throughout: NextAuth session checks via `getServerSession(authOptions)`, Prisma access via the existing `src/lib/prisma.ts` client, the existing ownership/source rule (`source !== "manual" || userId !== session.user.id` → 403), the existing JSON-response convention (not `204 No Content`), and the existing dark-theme bottom-sheet modal / pill-button design system (`rounded-full`, `font-mono text-xs uppercase tracking-widest`, `text-accent-alert` as the destructive color token). No other component, route, or schema is modified.
+
+## Tech Stack & Constraints
+- TypeScript, Next.js App Router API routes — same as the existing `POST`/`PATCH` handlers.
+- Auth via `getServerSession(authOptions)` from `next-auth`, matching the exact pattern already used in `POST`/`PATCH`.
+- Database access via `prisma.activity.delete({ where: { id } })` using the existing Prisma client — no schema or migration change.
+- UI implemented with plain React state in `ManualEntryModal.tsx` — no new npm dependency (no toast/dialog/confirm library), no native `window.confirm()`.
+- Hard constraints:
+  - Must not change the existing `POST /api/activities` or `PATCH /api/activities/:id` contract or behavior.
+  - Must not add any Prisma schema or migration change (no `deletedAt`, no soft delete).
+  - Must not add a new prop or callback to `ManualEntryModal` — post-delete notification reuses the existing `onSaved` callback.
+  - Must not add a delete affordance anywhere outside `ManualEntryModal`'s edit mode (specifically, not on `ActivityCard`).
+  - Must not allow deletion of `source = strava` activities, or of another user's manual activities.
+  - Must remain backward-compatible with the existing manual-entry add/edit flow.
+
+## Non-Goals
+1. No soft delete, `deletedAt` column, or any Prisma schema/migration change.
+2. No undo, trash, or recovery mechanism after a delete is confirmed.
+3. No delete-history or audit log of deleted activities.
+4. No bulk delete — one activity per delete operation only.
+5. No ability for a user to delete another user's entries, and no admin override.
+6. No delete affordance on `ActivityCard` or anywhere in the feed outside of `ManualEntryModal` in edit mode.
+7. No changes to `POST /api/activities` (create) or the existing `PATCH` (edit) behavior/contract.
+8. No delete support for `source = strava` activities — no UI affordance, and the API rejects any such request with 403.
+9. No new npm dependencies (no toast/dialog/confirm library).
+10. No new `onDeleted` callback or other new prop on `ManualEntryModal` — the existing `onSaved` callback is reused.
+11. No automated tests added — project has no test suite; QA is manual against this spec's Acceptance Criteria.
+
+## Core Behavior
+1. **Delete button visibility.** When `ManualEntryModal` is open in edit mode (`editingActivity` is non-null), its footer shows a "Delete" button styled with `text-accent-alert`, alongside the existing Cancel and Save buttons. When the modal is open in add mode (`editingActivity` is null), no Delete button is rendered.
+2. **Arming the confirmation.** Clicking "Delete" swaps that button in place, with no layout shift, for a "Confirm Delete" button — same `text-accent-alert` destructive tone, styled more emphatically (e.g., filled instead of outline) to signal the armed/irreversible state. No network request is made by this click.
+3. **Backing out of the armed state.** While armed ("Confirm Delete" showing), any of the following resets the button back to the normal unarmed "Delete" label, with no delete request made:
+   - Clicking the modal's existing "Cancel" button (which also closes the modal, per existing behavior).
+   - Clicking outside the modal panel, on the existing backdrop (which also closes the modal via the existing `onClick={onClose}`, per existing behavior).
+   - Pressing Escape (which also closes the modal, matching backdrop-click behavior).
+4. **Confirming the delete.** Clicking "Confirm Delete" (the second click) sends a `DELETE /api/activities/${editingActivity.id}` request.
+5. **Successful delete.** On a successful response (`res.ok`), the modal calls the existing `onSaved()` callback followed by `onClose()` — the same two calls `handleSubmit` already makes after a successful save. This triggers the feed's existing refresh mechanism and closes the modal. No new callback is introduced.
+6. **Failed delete.** On a failed response (network error, or any non-2xx status including 403/404) the modal does not close, does not lose the in-progress form data, and shows the error using the existing `error` state / `text-accent-alert` `<p>` pattern already used for failed saves. The button resets to the unarmed "Delete" state — it must never remain stuck on "Confirm Delete" after a failure.
+7. **API authorization — no session.** `DELETE /api/activities/:id` returns 401 if there is no authenticated session (`getServerSession(authOptions)` returns null).
+8. **API authorization — not found.** `DELETE /api/activities/:id` returns 404 if no `Activity` row matches `id`.
+9. **API authorization — ownership/source.** `DELETE /api/activities/:id` returns 403 if the matched activity's `source !== "manual"` or its `userId !== session.user.id` — the identical rule already enforced by `PATCH`. This covers both `source = strava` activities and manual activities owned by a different user.
+10. **API success.** When all checks pass, the handler performs `prisma.activity.delete({ where: { id } })` and returns `200` with JSON body `{ success: true }`.
+11. **Concurrent/already-deleted row.** If `prisma.activity.delete` fails because the row no longer exists (e.g., it was already deleted in another tab, or deleted between the `findUnique` ownership check and the delete call), the handler treats this as a 404, not an unhandled 500.
+
+## Data Model
+N/A — no schema, column, or migration changes. Deletion is a hard `prisma.activity.delete` against the existing `Activity` table; no `deletedAt` or other soft-delete field is added.
+
+## Interface / API
+
+**New API route**
+- `DELETE /api/activities/:id` (added to `src/app/api/activities/[id]/route.ts`, alongside the existing `PATCH` export)
+  - Auth: `getServerSession(authOptions)`; no session → `401`.
+  - Lookup: `prisma.activity.findUnique({ where: { id } })`; no match → `404`.
+  - Authorization: if `existing.source !== "manual" || existing.userId !== session.user.id` → `403`.
+  - On pass: `prisma.activity.delete({ where: { id } })`, catching a "record not found" failure from this call and returning `404` instead of a raw 500.
+  - Success response: `200` with JSON body `{ success: true }`.
+
+**`ManualEntryModal.tsx` changes**
+- New local boolean state (e.g. `confirmingDelete`) tracking whether the delete confirmation is armed. Reset to `false` on Cancel click, backdrop click, Escape keypress, and after a failed delete request.
+- Footer button, edit mode only: unarmed → button labeled "Delete" (`text-accent-alert`, outline/existing pill style); armed → same button slot now labeled "Confirm Delete" (`text-accent-alert`, filled/more emphatic pill style). No change to the Cancel or Save/Add buttons.
+- New handler (e.g. `handleDelete`) invoked by the "Confirm Delete" click: sends `fetch("DELETE", /api/activities/${editingActivity.id})` (or equivalent `fetch(url, { method: "DELETE" })` call), mirroring the existing `fetch` pattern in `handleSubmit`.
+  - On `res.ok`: call `onSaved()` then `onClose()`.
+  - On failure: set the existing `error` state (rendered via the existing `<p className="mt-4 font-body text-sm text-accent-alert">` pattern) and reset `confirmingDelete` to `false`; modal stays open, form data is preserved.
+- No new props are added to `ManualEntryModal` (`open`, `editingActivity`, `onClose`, `onSaved` remain unchanged).
+
+**No changes** to `src/app/api/activities/route.ts` (`POST`), `DashboardClient.tsx`, `ActivityCard.tsx`, `src/lib/serialize.ts`, or `prisma/schema.prisma`.
+
+## Acceptance Criteria
+- [ ] Opening `ManualEntryModal` in edit mode (via "Edit" on an owned manual activity) shows a "Delete" button in the footer alongside Cancel and Save.
+- [ ] Opening `ManualEntryModal` in add mode shows no Delete button.
+- [ ] Clicking "Delete" once swaps the button in place for "Confirm Delete" with no layout shift, and sends no network request.
+- [ ] With "Confirm Delete" armed, clicking the modal's Cancel button resets the button to "Delete" and closes the modal, without sending a delete request.
+- [ ] With "Confirm Delete" armed, clicking the backdrop outside the modal panel resets the button to "Delete" and closes the modal, without sending a delete request.
+- [ ] With "Confirm Delete" armed, pressing Escape resets the button to "Delete" and closes the modal, without sending a delete request.
+- [ ] Clicking "Confirm Delete" sends a `DELETE /api/activities/:id` request for the activity being edited.
+- [ ] On a successful delete response, the modal closes and the feed reflects the activity's removal (via the existing `onSaved`-triggered refresh).
+- [ ] On a failed delete response (network error or non-2xx), the modal remains open, the in-progress form data is unchanged, and an error message is shown via the existing `text-accent-alert` error pattern.
+- [ ] After a failed delete response, the Delete button is reset to its unarmed "Delete" label, not left on "Confirm Delete".
+- [ ] `DELETE /api/activities/:id` returns 401 when called without an authenticated session.
+- [ ] `DELETE /api/activities/:id` returns 404 when `id` does not match any existing `Activity` row.
+- [ ] `DELETE /api/activities/:id` returns 403 when called against a `source = strava` activity.
+- [ ] `DELETE /api/activities/:id` returns 403 when called against a manual activity owned by a different user than the session user.
+- [ ] `DELETE /api/activities/:id` returns 200 with JSON body `{ success: true }` when called against a manual activity owned by the session user, and the row is removed from the database (hard delete, not soft delete).
+- [ ] After a successful delete, the deleted activity no longer appears in the activity feed or leaderboard totals.
+- [ ] No delete affordance appears anywhere on `ActivityCard` or elsewhere in the feed outside of `ManualEntryModal`'s edit-mode footer.
+
+## Regression Safety
+- [ ] `POST /api/activities` (create manual activity) continues to work exactly as before, unaffected by the new `DELETE` export in the sibling route file.
+- [ ] `PATCH /api/activities/:id` (edit manual activity) continues to work exactly as before — same success/401/403/404 behavior, same response shape.
+- [ ] Adding a new manual workout via `ManualEntryModal` in add mode is unaffected — no Delete button appears, and Save/Cancel behave as before.
+- [ ] Editing an existing manual workout via `ManualEntryModal` and clicking "Save Changes" still saves correctly and closes the modal, unaffected by the new Delete/Confirm Delete state.
+- [ ] Clicking Cancel in edit mode when the delete confirmation is NOT armed still closes the modal with no changes, exactly as before.
+- [ ] Clicking the backdrop or pressing Escape when the delete confirmation is NOT armed still closes the modal exactly as before, with no unexpected side effects.
+- [ ] `DashboardClient.tsx`'s `canEdit` gating and `openEdit`/`openAdd` flow are unchanged — Edit is still only offered for manual activities owned by the current user.
+- [ ] `ActivityCard.tsx` rendering and its "Edit" button behavior are unchanged.
+- [ ] `source = strava` activities remain fully non-editable and non-deletable through the UI, exactly as before.
+
+## Open Questions Resolved
+- The Delete button is placed inside `ManualEntryModal`'s existing footer, alongside Cancel and Save — not in a separate header/footer area, and not as a new dialog/screen.
+- The confirmation pattern is an in-place button swap (Delete → Confirm Delete) using local component state — no `window.confirm()`, no new dialog library, no new dependency.
+- Both the unarmed "Delete" and armed "Confirm Delete" buttons use `text-accent-alert`, the project's existing destructive-tone color token; the armed state is visually more emphatic (e.g., filled vs. outline) but introduces no new color.
+- Backing out of the armed "Confirm Delete" state is possible via Cancel, backdrop click, or Escape — all three reset to the unarmed "Delete" label; Cancel and backdrop/Escape additionally close the modal, matching their existing behavior.
+- A failed delete request leaves the modal open, preserves form data, shows the error inline via the existing `error` state, and resets the button to the unarmed "Delete" state rather than leaving it stuck armed.
+- `DELETE /api/activities/:id` returns `200` with JSON body `{ success: true }` on success, matching the existing `POST`/`PATCH` JSON-response convention rather than `204 No Content`.
+- On successful delete, `ManualEntryModal` calls the existing `onSaved()` callback followed by `onClose()` — the same two calls used after a successful save. No new `onDeleted` callback is introduced, and no new prop is added to `ManualEntryModal`.
+- The new `DELETE` handler reuses the exact ownership/source rejection logic already used by `PATCH` in `src/app/api/activities/[id]/route.ts`, so the two operations cannot drift apart in behavior.
+- `source = strava` activities receive no delete affordance in the UI and are rejected with 403 if a delete is attempted against them directly via the API.
+- No Prisma schema or migration changes are made; deletion is a plain, permanent `prisma.activity.delete` hard delete with no soft-delete field, no undo, and no audit trail.
+- A `prisma.activity.delete` call that fails because the target row was already removed (e.g., a race with another tab/request) is treated by the handler as a 404, not surfaced as a raw 500.

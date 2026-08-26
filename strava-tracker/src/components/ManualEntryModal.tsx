@@ -54,15 +54,63 @@ export default function ManualEntryModal({
   const [form, setForm] = useState<ManualEntryFormValues>(emptyForm());
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
 
   useEffect(() => {
     if (open) {
       setForm(editingActivity ? fromActivity(editingActivity) : emptyForm());
       setError(null);
+      setConfirmingDelete(false);
     }
   }, [open, editingActivity]);
 
+  useEffect(() => {
+    if (!open) return;
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        setConfirmingDelete(false);
+        onClose();
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [open, onClose]);
+
   if (!open) return null;
+
+  function handleCancel() {
+    setConfirmingDelete(false);
+    onClose();
+  }
+
+  function handleBackdropClick() {
+    setConfirmingDelete(false);
+    onClose();
+  }
+
+  async function handleDelete() {
+    if (!editingActivity) return;
+    if (!confirmingDelete) {
+      setConfirmingDelete(true);
+      return;
+    }
+
+    setError(null);
+    try {
+      const res = await fetch(`/api/activities/${editingActivity.id}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error ?? "Failed to delete activity");
+      }
+      onSaved();
+      onClose();
+    } catch (err) {
+      setError((err as Error).message);
+      setConfirmingDelete(false);
+    }
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -104,7 +152,7 @@ export default function ManualEntryModal({
     <div className="fixed inset-0 z-40 flex items-end justify-center">
       <div
         className="absolute inset-0 bg-bg/70 backdrop-blur-sm animate-[sheet-backdrop-in_0.2s_ease-out]"
-        onClick={onClose}
+        onClick={handleBackdropClick}
         aria-hidden
       />
       <form
@@ -207,9 +255,23 @@ export default function ManualEntryModal({
         {error && <p className="mt-4 font-body text-sm text-accent-alert">{error}</p>}
 
         <div className="mt-6 flex items-center justify-end gap-3">
+          {editingActivity && (
+            <button
+              type="button"
+              onClick={handleDelete}
+              className={
+                confirmingDelete
+                  ? "rounded-full bg-accent-alert px-4 py-2 font-mono text-xs font-semibold uppercase tracking-widest text-bg transition hover:opacity-90"
+                  : "rounded-full border border-accent-alert px-4 py-2 font-mono text-xs uppercase tracking-widest text-accent-alert transition hover:opacity-90"
+              }
+            >
+              {confirmingDelete ? "Confirm Delete" : "Delete"}
+            </button>
+          )}
+          <div className="flex-1" />
           <button
             type="button"
-            onClick={onClose}
+            onClick={handleCancel}
             className="rounded-full border border-border-strong px-4 py-2 font-mono text-xs uppercase tracking-widest text-text-secondary hover:text-text-primary"
           >
             Cancel
