@@ -5,9 +5,11 @@ import { useRouter } from "next/navigation";
 import { useSession } from "next-auth/react";
 import ActivityCard from "./ActivityCard";
 import PersonFilter from "./PersonFilter";
+import TypeFilter from "./TypeFilter";
 import BottomActionBar from "./BottomActionBar";
 import ManualEntryModal from "./ManualEntryModal";
 import type { PublicActivity, PublicUser } from "@/lib/serialize";
+import { normalizeActivityType, type ManualActivityType } from "@/lib/constants";
 
 export default function DashboardClient({
   activities,
@@ -19,13 +21,18 @@ export default function DashboardClient({
   const { data: session } = useSession();
   const router = useRouter();
   const [selectedUserIds, setSelectedUserIds] = useState<string[]>([]);
+  const [selectedTypes, setSelectedTypes] = useState<ManualActivityType[]>([]);
   const [modalOpen, setModalOpen] = useState(false);
   const [editingActivity, setEditingActivity] = useState<PublicActivity | null>(null);
 
   const visibleActivities = useMemo(() => {
-    if (selectedUserIds.length === 0) return activities;
-    return activities.filter((a) => selectedUserIds.includes(a.userId));
-  }, [activities, selectedUserIds]);
+    return activities.filter((a) => {
+      const personMatch = selectedUserIds.length === 0 || selectedUserIds.includes(a.userId);
+      const typeMatch =
+        selectedTypes.length === 0 || selectedTypes.includes(normalizeActivityType(a.type));
+      return personMatch && typeMatch;
+    });
+  }, [activities, selectedUserIds, selectedTypes]);
 
   const currentUserId = session?.user?.id;
 
@@ -49,7 +56,10 @@ export default function DashboardClient({
         <h1 className="font-display text-2xl font-extrabold uppercase tracking-tight text-text-primary">
           Activity Feed
         </h1>
-        <PersonFilter users={users} selectedIds={selectedUserIds} onChange={setSelectedUserIds} />
+        <div className="flex flex-wrap items-center gap-3">
+          <PersonFilter users={users} selectedIds={selectedUserIds} onChange={setSelectedUserIds} />
+          <TypeFilter selectedTypes={selectedTypes} onChange={setSelectedTypes} />
+        </div>
       </div>
 
       {visibleActivities.length === 0 ? (

@@ -462,3 +462,206 @@ No CLI flags, endpoints, or new UI flows are introduced.
 - `ManualEntryModal.tsx` and the manual-entry form are not touched in any way by this feature — no pace field, no validation change.
 - No leaderboard file, API route, or Prisma schema/migration is touched by this feature.
 - Pace is never persisted; it is computed independently per card on every render with no caching or batching layer.
+
+## Feature: Filter Feed by Activity Type (added 2026-08-26)
+
+## Purpose
+Today the public activity feed at `/` can only be narrowed by who did an activity (the existing `PersonFilter`). This feature adds a second, independent filter that narrows the feed by what kind of activity it was — e.g. "only Runs," or combined with the person filter, "only this person's Rides." It is for strava-tracker's full audience (the small group of 2-4 friends, logged in or not, viewing the public feed). Because Strava-sourced activities store whatever raw `sport_type`/`type` string Strava's API returned (e.g. `TrailRun`, `VirtualRide`, `WeightTraining`) while manually-entered activities are restricted to a fixed 8-category list, this feature also introduces a small pure normalization function that groups any raw Strava type string into its closest matching one of the 8 manual categories, so the filter's selectable options are always exactly those 8 categories rather than a long, messy list of raw Strava strings. Success looks like: a viewer can open a dropdown, check one or more of the 8 categories, and the feed narrows to matching activities (Strava or manual) combined with any active person filter via AND logic, with zero changes to stored data or other pages.
+
+## Fits Into Existing System
+This feature is additive to the existing feed and touches only client-side filtering logic and one new component:
+
+- `src/app/page.tsx` — server component that fetches `activities` and `users` via Prisma and passes them to `DashboardClient`. **Not modified.** No new query params, no server-side filtering.
+- `src/components/DashboardClient.tsx` — the feed's client component. Currently holds `selectedUserIds` state and a `visibleActivities` `useMemo` filtering by person only, and renders `PersonFilter` in the header row `<div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">` next to the "Activity Feed" heading. Gains new `selectedTypes` state, renders the new `TypeFilter` alongside `PersonFilter` in that same header row, and updates `visibleActivities` to AND-combine person-match and type-match.
+- `src/components/PersonFilter.tsx` — read-only interaction-pattern precedent (multi-select via array of selected ids/types, empty-selection-means-show-all, toggle-on-click, "Clear" button shown only when active). **Not modified in any way.**
+- `src/lib/constants.ts` — already defines `MANUAL_ACTIVITY_TYPES` (fixed 8-category tuple), `ManualActivityType` (derived union type), and `isManualActivityType()` (type guard). Extended with a new lookup table `STRAVA_TYPE_TO_MANUAL_CATEGORY` and a new pure function `normalizeActivityType`, both colocated here (not in `src/lib/units.ts`, not a new file) because this is a type-taxonomy concern that builds directly on `MANUAL_ACTIVITY_TYPES`/`ManualActivityType`/`isManualActivityType`, not a unit-conversion concern.
+- `src/lib/serialize.ts` — read-only; `PublicActivity.type: string` and `PublicActivity.source: "strava" | "manual"` are the inputs the new mapping function consumes. **Not modified.**
+- New file `src/components/TypeFilter.tsx` — a new dropdown multi-select component, sibling to `PersonFilter.tsx`, following the project's existing dark-theme design system conventions (`font-mono` labels, `uppercase tracking-widest`, `accent-positive` active-state color token, `border`/`text-tertiary`/`text-primary` tokens already used by `PersonFilter`).
+- `src/lib/strava/backfill.ts` and `src/lib/strava/webhook.ts` — read-only; confirmed these already store Strava's raw `sport_type ?? type` string verbatim as `Activity.type`, which is exactly the input shape `normalizeActivityType` must handle. **Not modified.**
+
+## Tech Stack & Constraints
+- TypeScript, Next.js App Router, React function components, Tailwind CSS — unchanged, matches the existing stack.
+- No new npm dependency of any kind. The dropdown is built from scratch with plain React state, a ref, and a `useEffect` document click listener — no headless-UI/Radix/dropdown library.
+- No Prisma schema or migration changes.
+- No change to any existing API route contract (`POST /api/activities`, `PATCH /api/activities/:id`, `DELETE /api/activities/:id`, webhook routes, auth routes) — filtering is entirely client-side against already-fetched data.
+- `Activity.type` as stored in the database is never rewritten, migrated, or backfilled — normalization happens only at filter-evaluation/render time in the client.
+- No changes to `PersonFilter.tsx`'s component, styling, or behavior.
+- No changes to `ActivityCard.tsx`'s rendering or the raw (unnormalized) `activity.type` label it displays.
+- No changes to `src/lib/units.ts`'s `STRAVA_RUN_TYPES` constant or the Average Pace feature's pace logic.
+- Must remain backward-compatible: existing person-filter behavior and feed rendering must work unchanged when no type filter is applied.
+
+## Non-Goals
+- No changes to the leaderboard (`/leaderboard`, `LeaderboardClient.tsx`, `src/lib/leaderboard.ts`) — this filter is feed-only.
+- No persistence of the selected type filter across page reloads/sessions — no URL query param, no localStorage, no cookie. Matches `PersonFilter`'s existing reset-on-reload behavior.
+- No changes to how activities are categorized or stored in the database.
+- No Prisma schema or migration changes.
+- No changes to any existing API route contract or webhook/auth routes.
+- No new npm dependency.
+- No changes to `PersonFilter.tsx`.
+- No changes to `ActivityCard.tsx`'s rendering, its raw `activity.type` label, or `units.ts`'s `STRAVA_RUN_TYPES`/pace logic.
+- No new activity-type categories beyond the 8 already fixed in `MANUAL_ACTIVITY_TYPES` — everything not exactly matching one of the 8 or a known Strava raw type falls into `"Other"`, not a 9th category.
+- No server-side filtering, no new query params on `page.tsx`, no changes to the Prisma queries in `src/app/page.tsx`.
+- No accessibility-framework additions (no Radix/Headless UI) — plain HTML/hand-authored ARIA attributes only if used.
+- No automated test suite is introduced by this feature (none exists in this project today).
+
+## Core Behavior
+1. **Normalizing a raw activity type.** Given any activity's raw `type` string (manual category string like `"Run"`, or a raw Strava string like `TrailRun`, `VirtualRide`, `WeightTraining`, or something entirely unrecognized like `AlpineSki`), `normalizeActivityType` returns exactly one of the 8 `ManualActivityType` values. If the input already exactly matches one of the 8 manual categories, that category is returned as-is. If it matches a known key in `STRAVA_TYPE_TO_MANUAL_CATEGORY`, the mapped category is returned. Otherwise, `"Other"` is returned. The function never throws and always returns a value.
+2. **Viewer opens the type filter dropdown.** Clicking the `TypeFilter` trigger button toggles open a panel listing all 8 `MANUAL_ACTIVITY_TYPES` as checkable options. Clicking the trigger again (while open) closes it.
+3. **Viewer selects one or more types.** Clicking an unselected option in the open panel adds it to `selectedTypes`; the panel remains open (no auto-close on selection) so multiple types can be checked in sequence. Clicking an already-selected option removes it from `selectedTypes`.
+4. **No selection means show all types.** When `selectedTypes` is empty, every activity passes the type-filter condition regardless of its normalized type — same convention as `PersonFilter`'s empty-selection-shows-all behavior.
+5. **Combining with the person filter.** The feed's `visibleActivities` shows only activities that satisfy both the person-filter condition AND the type-filter condition simultaneously (logical AND, not OR). Each condition independently defaults to "show all" when its respective selection is empty.
+6. **Clearing the type filter.** When `selectedTypes.length > 0`, a "Clear" action is visible in the `TypeFilter` panel; clicking it resets `selectedTypes` to `[]` (equivalent to "show all types") without closing the dropdown itself.
+7. **Active-filter visual indication.** When `selectedTypes.length > 0`, the `TypeFilter` trigger button visually indicates an active filter (using the existing `accent-positive` color token), consistent with how `PersonFilter`'s active pills are styled.
+8. **Outside click closes the dropdown.** While the panel is open, clicking anywhere outside the `TypeFilter` component (trigger + panel) closes the panel without changing `selectedTypes`.
+9. **Placement.** The `TypeFilter` dropdown renders in `DashboardClient`'s existing header row, alongside `PersonFilter`, without altering the "Activity Feed" heading or `PersonFilter`'s own rendering/behavior.
+10. **Strava vs. manual activities are treated uniformly.** The type filter applies the same normalization to every activity regardless of `source` ("strava" or "manual") — the caller never branches on `source` to filter by type.
+
+## Data Model
+N/A — no new or changed database schema, Prisma model, or persisted file format. `PublicActivity` and `Activity.type` are read-only inputs to this feature and are not altered in shape or value.
+
+## Interface / API
+
+**`src/lib/constants.ts`** — new exports, added alongside the existing `MANUAL_ACTIVITY_TYPES`/`ManualActivityType`/`isManualActivityType`:
+
+```ts
+// Maps Strava's raw sport_type/type strings to their closest matching
+// manual category. Best-effort grouping based on Strava's sport_type
+// taxonomy; unmapped keys are not listed here and fall through to "Other".
+export const STRAVA_TYPE_TO_MANUAL_CATEGORY: Record<string, ManualActivityType> = {
+  // Run family
+  Run: "Run",
+  TrailRun: "Run",
+  VirtualRun: "Run",
+  // Ride family
+  Ride: "Ride",
+  MountainBikeRide: "Ride",
+  GravelRide: "Ride",
+  EBikeRide: "Ride",
+  EMountainBikeRide: "Ride",
+  VirtualRide: "Ride",
+  Handcycle: "Ride",
+  Velomobile: "Ride",
+  // Walk
+  Walk: "Walk",
+  // Hike
+  Hike: "Hike",
+  // Swim
+  Swim: "Swim",
+  // Weight Training family
+  WeightTraining: "Weight Training",
+  Workout: "Weight Training",
+  Crossfit: "Weight Training",
+  HighIntensityIntervalTraining: "Weight Training",
+  // Yoga
+  Yoga: "Yoga",
+  Pilates: "Yoga",
+};
+
+// Pure function. Normalizes any activity type string — whether it's
+// already an exact manual category (source = "manual") or a raw Strava
+// sport_type/type string (source = "strava") — into one of the 8 fixed
+// ManualActivityType categories. Never throws; unrecognized input maps
+// to "Other".
+export function normalizeActivityType(rawType: string): ManualActivityType {
+  if (isManualActivityType(rawType)) return rawType;
+  return STRAVA_TYPE_TO_MANUAL_CATEGORY[rawType] ?? "Other";
+}
+```
+
+This exact mapping table (including the low-confidence `Workout`/`Crossfit`/`HighIntensityIntervalTraining` → `"Weight Training"` and `Pilates` → `"Yoga"` groupings) is approved as-is and must be implemented verbatim — do not add, remove, or reassign entries.
+
+**`src/components/TypeFilter.tsx`** (new file):
+
+```ts
+export default function TypeFilter({
+  selectedTypes,
+  onChange,
+}: {
+  selectedTypes: ManualActivityType[];
+  onChange: (types: ManualActivityType[]) => void;
+}): JSX.Element
+```
+
+- Renders a single trigger button (label e.g. "Type") using the `font-mono text-xs uppercase tracking-widest` convention already used for labels in `PersonFilter`.
+- Local boolean state (e.g. `open`) controls whether the dropdown panel is shown; toggled by clicking the trigger.
+- The panel lists all 8 values from `MANUAL_ACTIVITY_TYPES` as checkbox-style options in a fixed, stable order (the order they appear in `MANUAL_ACTIVITY_TYPES`).
+- Clicking an option toggles its membership in `selectedTypes` via the same toggle-array pattern as `PersonFilter.toggle` (add if absent, remove if present), calling `onChange` with the new array; the panel does not close on option click.
+- A "Clear" element, shown only when `selectedTypes.length > 0`, calls `onChange([])` when clicked.
+- The trigger button applies `accent-positive`-based styling (e.g. border/background/text treatment consistent with `PersonFilter`'s active-pill styling) whenever `selectedTypes.length > 0`, and default/inactive styling otherwise.
+- A ref on the component's root element plus a `document` `mousedown` (or `click`) listener registered via `useEffect` while `open` is true closes the panel when a click target is outside the ref'd element; the listener is removed on close/unmount.
+- Uses only Tailwind classes and color tokens already present in the codebase (e.g. `border-accent-positive/50`, `bg-accent-positive/10`, `text-text-primary`, `border-border`, `text-text-tertiary`) — no new colors.
+
+**`src/components/DashboardClient.tsx`** — changes:
+
+- New import: `TypeFilter` from `./TypeFilter`, and `normalizeActivityType`, `ManualActivityType` from `@/lib/constants`.
+- New state: `const [selectedTypes, setSelectedTypes] = useState<ManualActivityType[]>([]);`
+- `visibleActivities` becomes:
+  ```ts
+  const visibleActivities = useMemo(() => {
+    return activities.filter((a) => {
+      const personMatch = selectedUserIds.length === 0 || selectedUserIds.includes(a.userId);
+      const typeMatch =
+        selectedTypes.length === 0 || selectedTypes.includes(normalizeActivityType(a.type));
+      return personMatch && typeMatch;
+    });
+  }, [activities, selectedUserIds, selectedTypes]);
+  ```
+- In the header row (`<div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">`), `TypeFilter` is rendered alongside the existing `<PersonFilter users={users} selectedIds={selectedUserIds} onChange={setSelectedUserIds} />`, e.g.:
+  ```tsx
+  <div className="flex flex-wrap items-center gap-3">
+    <PersonFilter users={users} selectedIds={selectedUserIds} onChange={setSelectedUserIds} />
+    <TypeFilter selectedTypes={selectedTypes} onChange={setSelectedTypes} />
+  </div>
+  ```
+  (Exact wrapper markup is an implementation detail; the requirement is that the row's existing heading and responsive layout — stacked on mobile, `justify-between` row on `sm:`+ — remain intact and `PersonFilter`'s own JSX/props are unchanged.)
+
+`src/app/page.tsx` — no interface changes; still passes only `activities` and `users` to `DashboardClient`.
+
+## Acceptance Criteria
+- [ ] `normalizeActivityType("Run")` returns `"Run"`; `normalizeActivityType("TrailRun")` returns `"Run"`; `normalizeActivityType("VirtualRun")` returns `"Run"`.
+- [ ] `normalizeActivityType("Ride")`, `"MountainBikeRide"`, `"GravelRide"`, `"EBikeRide"`, `"EMountainBikeRide"`, `"VirtualRide"`, `"Handcycle"`, and `"Velomobile"` all return `"Ride"`.
+- [ ] `normalizeActivityType("Walk")` returns `"Walk"`; `normalizeActivityType("Hike")` returns `"Hike"`; `normalizeActivityType("Swim")` returns `"Swim"`.
+- [ ] `normalizeActivityType("WeightTraining")`, `"Workout"`, `"Crossfit"`, and `"HighIntensityIntervalTraining"` all return `"Weight Training"`.
+- [ ] `normalizeActivityType("Yoga")` and `normalizeActivityType("Pilates")` both return `"Yoga"`.
+- [ ] `normalizeActivityType` called with an unrecognized string (e.g. `"AlpineSki"`, `"Rowing"`, `"Golf"`) returns `"Other"`.
+- [ ] `normalizeActivityType` called with any of the 8 exact `ManualActivityType` strings (e.g. `"Other"`, `"Weight Training"`) returns that same string unchanged.
+- [ ] `STRAVA_TYPE_TO_MANUAL_CATEGORY` and `normalizeActivityType` are exported from `src/lib/constants.ts` (not `src/lib/units.ts`, not a new file).
+- [ ] `src/components/TypeFilter.tsx` exists as a new file exporting a default React component accepting `selectedTypes: ManualActivityType[]` and `onChange: (types: ManualActivityType[]) => void` props.
+- [ ] Clicking the `TypeFilter` trigger button when the panel is closed opens the panel; clicking it again while open closes it.
+- [ ] The open panel lists all 8 values from `MANUAL_ACTIVITY_TYPES`, each independently checkable.
+- [ ] Clicking an unchecked type option adds it to the selection (invokes `onChange` with the previous array plus that type) and the panel remains open.
+- [ ] Clicking an already-checked type option removes it from the selection (invokes `onChange` with that type filtered out) and the panel remains open.
+- [ ] With `selectedTypes` empty, the feed shows activities of every type (subject to the person filter).
+- [ ] With one or more types selected, the feed shows only activities whose `normalizeActivityType(activity.type)` is included in `selectedTypes`.
+- [ ] With both a person filter and a type filter active, the feed shows only activities matching both conditions simultaneously (AND, not OR).
+- [ ] A "Clear" action is visible in/on the `TypeFilter` UI only when `selectedTypes.length > 0`, and clicking it resets the selection to empty (feed reverts to showing all types, subject to the person filter).
+- [ ] When `selectedTypes.length > 0`, the `TypeFilter` trigger button is visually styled with the active-state (`accent-positive`-based) treatment; when empty, it is not.
+- [ ] With the panel open, clicking an element outside the `TypeFilter` component's trigger and panel closes the panel and leaves `selectedTypes` unchanged.
+- [ ] With the panel open, clicking inside the panel (e.g. on an option) does not close the panel.
+- [ ] `TypeFilter` renders in `DashboardClient`'s existing header row alongside `PersonFilter`, and the "Activity Feed" heading is still present and unchanged.
+- [ ] Manually-entered activities and Strava-sourced activities are both correctly included/excluded by the type filter using the same `normalizeActivityType` logic (no branching on `activity.source` for type-filter purposes).
+- [ ] No network request, URL change, or query-string change occurs as a result of interacting with `TypeFilter` (filtering is client-side only).
+- [ ] Reloading the page resets `selectedTypes` to empty (no persistence via URL, localStorage, or cookie).
+
+## Regression Safety
+- [ ] `PersonFilter`'s rendering, pill styling, toggle behavior, and "Clear" button continue to work exactly as before, unaffected by the presence of `TypeFilter`.
+- [ ] With `selectedTypes` empty (the default/initial state), the feed's visible activities are identical to what they were before this feature (i.e., determined by `selectedUserIds` alone).
+- [ ] `Activity.type` values in the database are unchanged by any interaction with the new filter — normalization is never written back to storage.
+- [ ] `ActivityCard`'s displayed type label continues to show the raw, unnormalized `activity.type` value, not the normalized category.
+- [ ] The leaderboard page (`/leaderboard`) and its data (`src/lib/leaderboard.ts`, `LeaderboardClient.tsx`) are unaffected by this feature.
+- [ ] `src/app/page.tsx`'s Prisma queries and props passed to `DashboardClient` (`activities`, `users`) are unchanged.
+- [ ] Existing API routes (`POST /api/activities`, `PATCH /api/activities/:id`, `DELETE /api/activities/:id`, webhook routes, auth routes) behave identically to before this feature.
+- [ ] The header row's existing responsive layout (stacked column on narrow viewports, row with space-between on `sm:` and above) is preserved with both `PersonFilter` and `TypeFilter` present.
+- [ ] The Average Pace feature's `STRAVA_RUN_TYPES` constant and pace computation/formatting logic in `src/lib/units.ts` are unchanged and unaffected.
+
+## Open Questions Resolved
+- The type filter is implemented as a dropdown multi-select (trigger button + panel), not a pill row — this is non-negotiable and distinct from `PersonFilter`'s style. Do not restyle it as a pill row for visual consistency.
+- `PersonFilter.tsx` is not modified in any way by this feature — treat it as read-only precedent only.
+- "No selection = show all" applies to the type filter exactly as it does for the person filter. The person filter and type filter combine with AND logic, never OR.
+- The Strava-to-manual-category mapping table (`STRAVA_TYPE_TO_MANUAL_CATEGORY`) and the `normalizeActivityType` function live in `src/lib/constants.ts` — not `src/lib/units.ts`, and not a new file. This deliberately deviates from the `STRAVA_RUN_TYPES`-in-`units.ts` precedent from the Average Pace feature; do not move it to `units.ts` or split it into a new module.
+- The mapping table's exact contents (including `Workout`/`Crossfit`/`HighIntensityIntervalTraining` → `"Weight Training"` and `Pilates` → `"Yoga"`) are approved as-is despite being lower-confidence groupings. Implement the table exactly as specified in Interface / API — do not add categories, remove entries, or reassign the questionable ones to `"Other"` on your own judgment.
+- Any raw Strava type string not present in `STRAVA_TYPE_TO_MANUAL_CATEGORY` and not exactly matching one of the 8 manual categories defaults to `"Other"`. This is intentional and not to be treated as a missing-entry bug.
+- No new npm dependency is used for the dropdown; it is built with plain React state, a ref, and a `useEffect`-based outside-click listener.
+- `src/app/page.tsx` requires no changes — all filtering, including the new type filter, happens client-side in `DashboardClient` over data already fetched server-side. Do not add query params or server-side filtering.
+- No persistence (URL, localStorage, cookie) of `selectedTypes` across reloads — it resets to empty on every page load, matching `selectedUserIds`'s existing behavior.
+- Exact visual details beyond what's specified here (precise panel positioning/width, checkbox iconography, spacing) are left to the developer's discretion within the existing dark-theme design system and existing color tokens — no new colors or design-system additions.
