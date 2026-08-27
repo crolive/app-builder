@@ -1,6 +1,12 @@
 import Avatar from "./Avatar";
 import Badge from "./Badge";
-import { formatMiles, formatSecondsToDuration } from "@/lib/units";
+import {
+  formatMiles,
+  formatSecondsToDuration,
+  computeAveragePaceSecondsPerMile,
+  formatPace,
+  isPaceEligible,
+} from "@/lib/units";
 import type { PublicActivity } from "@/lib/serialize";
 
 export default function ActivityCard({
@@ -14,6 +20,9 @@ export default function ActivityCard({
 }) {
   const stripeColor = activity.source === "strava" ? "bg-accent-positive" : "bg-text-tertiary";
   const startDate = new Date(activity.startDate);
+  const pace = isPaceEligible(activity.source, activity.type)
+    ? computeAveragePaceSecondsPerMile(activity.distanceMiles, activity.movingTimeSeconds)
+    : null;
 
   return (
     <div className="group relative overflow-hidden rounded-card border border-border bg-panel transition duration-150 hover:-translate-y-1 hover:border-border-strong hover:shadow-lift">
@@ -48,6 +57,7 @@ export default function ActivityCard({
             <span>{formatMiles(activity.distanceMiles)} mi</span>
             <span>{formatSecondsToDuration(activity.movingTimeSeconds)}</span>
             <span>{startDate.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })}</span>
+            {pace !== null && <span>{formatPace(pace)}</span>}
           </div>
         </div>
 

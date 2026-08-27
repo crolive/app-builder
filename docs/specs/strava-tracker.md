@@ -327,3 +327,138 @@ N/A — no schema, column, or migration changes. Deletion is a hard `prisma.acti
 - `source = strava` activities receive no delete affordance in the UI and are rejected with 403 if a delete is attempted against them directly via the API.
 - No Prisma schema or migration changes are made; deletion is a plain, permanent `prisma.activity.delete` hard delete with no soft-delete field, no undo, and no audit trail.
 - A `prisma.activity.delete` call that fails because the target row was already removed (e.g., a race with another tab/request) is treated by the handler as a 404, not surfaced as a raw 500.
+
+## Feature: Average Pace on Feed Cards (added 2026-08-26)
+
+## Purpose
+strava-tracker's public activity feed currently shows distance and moving time on each activity card, but users must do mental math to know how fast a run was. This feature adds a display-only average pace (`M:SS /mi`) to Run-type feed cards, computed at render time from data already stored on the activity. It is for the app's small existing user group (2–4 friends) who want an at-a-glance pace figure. Success is a correctly formatted, correctly gated pace string appearing on eligible Run cards with no changes to stored data, leaderboard behavior, or non-run cards.
+
+## Fits Into Existing System
+This feature touches exactly two existing files:
+- `src/lib/units.ts` — the project's designated home for pure unit-conversion/formatting helpers (already contains `formatMiles`, `formatSecondsToDuration`, `formatSecondsToHours`, `parseDurationToSeconds`). This feature adds a pace-computation helper, a pace-formatting helper, and a `STRAVA_RUN_TYPES` allow-list constant here, following the file's existing pure-function, no-side-effect convention.
+- `src/components/ActivityCard.tsx` — the sole rendering integration point. It already imports `formatMiles` and `formatSecondsToDuration` from `@/lib/units` and renders `activity.distanceMiles` and `activity.movingTimeSeconds` as `<span>` elements inside the metadata row at lines 47–51 (`<div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 font-mono text-xs text-text-secondary">`). This feature adds one more conditionally-rendered `<span>` to that same row, following the same import and inline-computation style already used for distance/time.
+
+Read-only dependencies (not modified):
+- `src/lib/serialize.ts` / `PublicActivity` — supplies the exact inputs this feature needs: `type: string`, `source: "strava" | "manual"`, `distanceMiles: number`, `movingTimeSeconds: number`.
+- `src/lib/constants.ts` (`MANUAL_ACTIVITY_TYPES`, `isManualActivityType`) — confirms that for `source = "manual"`, `type` is always exactly one of a fixed set including the literal `"Run"`.
+- `src/lib/strava/backfill.ts` and `src/lib/strava/webhook.ts` — confirm that for `source = "strava"`, `type` is Strava's raw, unnormalized `sport_type ?? type` string (e.g. `"Run"`, `"TrailRun"`, `"VirtualRun"`, `"Ride"`, etc.), stored as-is with no mapping layer anywhere in the codebase.
+
+No other files are touched. `src/lib/leaderboard.ts`, `src/app/api/**`, `prisma/schema.prisma`, and `src/components/ManualEntryModal.tsx` are explicitly out of scope and must not be modified.
+
+## Tech Stack & Constraints
+- TypeScript, Next.js (React function components) — matches existing stack, no change.
+- No new npm dependency of any kind; pace math is plain arithmetic.
+- No Prisma schema or migration change; pace is never persisted, only computed at render time.
+- No change to `PublicActivity`'s shape or to `src/lib/serialize.ts`.
+- No change to any API route contract under `src/app/api/**`.
+- No change to `ManualEntryModal.tsx` or the manual-entry form.
+- New pace helpers and the `STRAVA_RUN_TYPES` constant must live in `src/lib/units.ts` — no new file, no new shared taxonomy module.
+- Must not throw on any input; degenerate inputs must fail silently (omit pace) rather than surface an error to the user.
+- Must remain backward-compatible: existing card rendering for distance, time, date, badges, and edit button must be visually and behaviorally unchanged for all cards, and non-Run cards must render exactly as before.
+
+## Non-Goals
+1. No new leaderboard metric; no change to `src/lib/leaderboard.ts`, `LeaderboardClient.tsx`, or any leaderboard UI/aggregation logic.
+2. No pace display, computation, or formatting for any non-run-family activity type, including but not limited to `"Ride"`, `"Walk"`, `"Hike"`, `"Swim"`, `"Weight Training"`, `"Yoga"`, `"Other"`, or any Strava-raw type string not on the run-family allow-list.
+3. No change to `ManualEntryModal.tsx` or the manual-entry form (no pace input field is added).
+4. No Prisma schema or migration change; pace is never stored in the database.
+5. No change to any API route contract; `src/app/api/**` is untouched.
+6. No new npm dependency.
+7. No personal dashboard, per-user detailed statistics page, or any new route/page.
+8. No configurable or user-selectable pace unit — miles-based `M:SS /mi` only, no km option.
+9. No change to card layout/styling conventions beyond one additional inline `<span>` in the existing metadata row.
+10. No normalization, mapping, or taxonomy system for Strava sport types beyond the small local allow-list used for this feature's eligibility check.
+11. No batching, caching, memoization, or persistence of computed pace values — computed independently per card on every render.
+
+## Core Behavior
+1. **Eligible Strava Run card displays pace.** For an activity with `source === "strava"` and `type` exactly matching one of `"Run"`, `"TrailRun"`, or `"VirtualRun"` (case-sensitive, exact string match, no substring/prefix/regex matching), and with `movingTimeSeconds > 0` and `distanceMiles > 0`, the card's metadata row displays a pace string formatted as `M:SS /mi` (e.g. `7:42 /mi`), computed as `movingTimeSeconds / distanceMiles` converted to minutes:seconds.
+2. **Eligible manual Run card displays pace.** For an activity with `source === "manual"` and `type === "Run"` (exact, case-sensitive), and with `movingTimeSeconds > 0` and `distanceMiles > 0`, the card displays pace using the same computation and format as above.
+3. **Non-run activity types never display pace.** For any activity (either `source`) whose `type` does not qualify under the eligibility rule above — e.g. `"Ride"`, `"Walk"`, `"Hike"`, `"Swim"`, `"Weight Training"`, `"Yoga"`, `"Other"`, or any other Strava-raw string not on the allow-list — the card renders exactly as before, with no pace `<span>` present in the DOM.
+4. **Zero or negative time/distance omits pace without error.** For an otherwise-eligible Run activity where `movingTimeSeconds <= 0` or `distanceMiles <= 0`, the card omits the pace display entirely (no pace `<span>` rendered) and does not throw an error or render `0:00 /mi`, `NaN /mi`, or `Infinity /mi`.
+5. **Non-finite computed pace omits pace without error.** If the computed pace value is not a finite number for any other reason, the card omits the pace display entirely, with no error thrown or surfaced.
+6. **Large pace values print raw minute count.** If computed pace minutes exceed 59 (e.g. an unusually slow activity), the format still prints the raw minute count with no hour component and no wraparound (e.g. `62:00 /mi`), consistent with the fixed `M:SS /mi` format (no `H:MM:SS` fallback).
+7. **Pace is computed per-card at render time.** No pace value is stored, cached, or batched; each card independently computes its own pace from its own `distanceMiles` and `movingTimeSeconds` on every render.
+
+## Data Model
+N/A — no schema, type, or file format changes. `PublicActivity` in `src/lib/serialize.ts` is unchanged; the feature reads its existing `type`, `source`, `distanceMiles`, and `movingTimeSeconds` fields.
+
+## Interface / API
+Two new exported functions and one new exported constant are added to `src/lib/units.ts`, colocated with the existing formatters:
+
+```ts
+// Allow-list of Strava's raw sport_type/type strings that qualify as "Run" family.
+// Exact, case-sensitive membership match only — no substring/prefix/regex matching.
+export const STRAVA_RUN_TYPES = ["Run", "TrailRun", "VirtualRun"] as const;
+
+// Pure computation. Returns null when pace should not be shown rather than throwing:
+// - movingTimeSeconds <= 0
+// - distanceMiles <= 0
+// - the computed result is not a finite number
+export function computeAveragePaceSecondsPerMile(
+  distanceMiles: number,
+  movingTimeSeconds: number
+): number | null;
+
+// Formats a pace-in-seconds-per-mile value as "M:SS /mi" (e.g. "7:42 /mi").
+// No hours component, ever. Minutes may exceed 59 and print as the raw
+// integer minute count (e.g. "62:00 /mi"). Caller is responsible for only
+// calling this with a valid (non-null, finite, non-negative) pace value —
+// this function does not itself guard against invalid input.
+export function formatPace(paceSecondsPerMile: number): string;
+```
+
+Eligibility check (either inlined in `ActivityCard.tsx` or as an optional exported helper `isPaceEligible` next to the pace helpers in `units.ts` — developer's discretion, no new shared taxonomy module either way):
+- `source === "manual"`: eligible when `type === "Run"` (exact, case-sensitive).
+- `source === "strava"`: eligible when `STRAVA_RUN_TYPES.includes(type)` (exact, case-sensitive membership).
+
+`ActivityCard.tsx` changes:
+- Import `computeAveragePaceSecondsPerMile`, `formatPace`, and `STRAVA_RUN_TYPES` (and `isPaceEligible` if the developer chooses to add it) from `@/lib/units`, added to the existing import at line 3 alongside `formatMiles` and `formatSecondsToDuration`.
+- Inside the component body, determine eligibility per the rule above, then call `computeAveragePaceSecondsPerMile(activity.distanceMiles, activity.movingTimeSeconds)`.
+- When eligible and the computed value is non-null, render one additional `<span>{formatPace(pace)}</span>` inside the existing metadata row (`<div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 font-mono text-xs text-text-secondary">` at lines 47–51), alongside the existing distance/time/date `<span>` elements. When not eligible or the computed value is null, no additional `<span>` is rendered — the row is unchanged from its current three children.
+- No new props, no new component, no change to `ActivityCard`'s existing prop signature (`activity`, `canEdit`, `onEdit`).
+
+No CLI flags, endpoints, or new UI flows are introduced.
+
+## Acceptance Criteria
+- [ ] A `source = "strava"` activity with `type = "Run"`, `distanceMiles > 0`, and `movingTimeSeconds > 0` displays a pace string formatted as `M:SS /mi` in the card's metadata row.
+- [ ] A `source = "strava"` activity with `type = "TrailRun"`, `distanceMiles > 0`, and `movingTimeSeconds > 0` displays a correctly formatted pace string.
+- [ ] A `source = "strava"` activity with `type = "VirtualRun"`, `distanceMiles > 0`, and `movingTimeSeconds > 0` displays a correctly formatted pace string.
+- [ ] A `source = "manual"` activity with `type = "Run"`, `distanceMiles > 0`, and `movingTimeSeconds > 0` displays a correctly formatted pace string.
+- [ ] The displayed pace value equals `movingTimeSeconds / distanceMiles` converted to `M:SS` (minutes floored or computed consistently, seconds zero-padded to two digits), e.g. 400 seconds over 1.0 miles displays as `6:40 /mi`.
+- [ ] A `source = "strava"` activity with `type = "Ride"`, `"Walk"`, `"Hike"`, `"Swim"`, `"Weight Training"`, `"Yoga"`, or `"Other"` never displays a pace span, regardless of `distanceMiles`/`movingTimeSeconds` values.
+- [ ] A `source = "strava"` activity with a lowercase or differently-cased variant of a run type (e.g. `"run"` or `"trailrun"`) does NOT display pace (match is case-sensitive and exact).
+- [ ] A `source = "manual"` activity with any `type` other than the exact literal `"Run"` (e.g. `"Ride"`, `"Walk"`, `"Hike"`, `"Swim"`, `"Weight Training"`, `"Yoga"`, `"Other"`) never displays a pace span.
+- [ ] An otherwise-eligible Run activity with `movingTimeSeconds = 0` omits the pace span entirely (no `0:00 /mi` rendered).
+- [ ] An otherwise-eligible Run activity with `movingTimeSeconds` negative omits the pace span entirely.
+- [ ] An otherwise-eligible Run activity with `distanceMiles = 0` omits the pace span entirely (no `Infinity /mi` or `NaN /mi` rendered).
+- [ ] An otherwise-eligible Run activity with `distanceMiles` negative omits the pace span entirely.
+- [ ] No error is thrown, logged as an uncaught exception, or surfaced to the user for any degenerate input (zero/negative distance or time) on an eligible Run activity.
+- [ ] `computeAveragePaceSecondsPerMile` returns `null` (not `NaN`, not `Infinity`, not a thrown error) for `distanceMiles <= 0`, `movingTimeSeconds <= 0`, or any input producing a non-finite result.
+- [ ] `formatPace` produces output with no hours component under any input, including pace values whose minute count exceeds 59 (e.g. a pace of 3720 seconds/mile formats as `62:00 /mi`, not `1:02:00 /mi`).
+- [ ] `STRAVA_RUN_TYPES`, `computeAveragePaceSecondsPerMile`, and `formatPace` are all defined and exported from `src/lib/units.ts` (not from a new file, not from `src/lib/constants.ts`).
+- [ ] Rendering two different eligible Run cards with different `distanceMiles`/`movingTimeSeconds` values produces two independently correct pace values (no shared/stale/cached state between cards).
+- [ ] No new npm package appears in `package.json` as a result of this feature.
+- [ ] No Prisma schema file or migration is added or modified as a result of this feature.
+
+## Regression Safety
+- [ ] Existing distance display (`{formatMiles(activity.distanceMiles)} mi`) renders unchanged on every card, Run and non-Run alike.
+- [ ] Existing moving-time display (`{formatSecondsToDuration(activity.movingTimeSeconds)}`) renders unchanged on every card, Run and non-Run alike.
+- [ ] Existing date display in the metadata row renders unchanged on every card.
+- [ ] The raw `activity.type` label above the metadata row (line 44) continues to render unnormalized and unchanged for all activities, including Run-family ones.
+- [ ] The `source` badge (`strava`/`manual`) and `stripeColor` styling continue to render unchanged.
+- [ ] The `DISCONNECTED` user badge and edit button behavior (`canEdit`/`onEdit`) are unaffected by this feature.
+- [ ] Non-Run cards (`"Ride"`, `"Walk"`, `"Hike"`, `"Swim"`, `"Weight Training"`, `"Yoga"`, `"Other"`, or unrecognized Strava types) render with exactly the same DOM structure and content as before this feature was added, with no extra `<span>` in the metadata row.
+- [ ] `src/lib/leaderboard.ts` output and behavior are unchanged (not touched by this feature).
+- [ ] `LeaderboardClient.tsx` and leaderboard UI are unchanged (not touched by this feature).
+- [ ] `ManualEntryModal.tsx` and the manual-entry form's fields and validation are unchanged (not touched by this feature).
+- [ ] No API route under `src/app/api/**` changes response shape or behavior.
+- [ ] `prisma/schema.prisma` is byte-for-byte unchanged; no migration files are added.
+- [ ] `PublicActivity`'s shape in `src/lib/serialize.ts` and the behavior of `toPublicActivity()` are unchanged.
+
+## Open Questions Resolved
+- Pace eligibility is `source`-dependent: for `source = "manual"`, require the exact literal `type === "Run"`; for `source = "strava"`, require membership in the fixed allow-list `["Run", "TrailRun", "VirtualRun"]`. Do not add, remove, or generalize this allow-list, and do not implement substring/prefix/regex matching — exact, case-sensitive equality only.
+- The zero/negative-value guard applies uniformly regardless of `source`: any Run-eligible activity with `movingTimeSeconds <= 0` or `distanceMiles <= 0` omits pace. Do not introduce a different or higher minimum threshold (e.g. omitting only under 60 seconds) — the cutoff is exactly `<= 0`.
+- Pace format is fixed at `M:SS /mi` with no hours component under any circumstance, including minute counts exceeding 59 (print the raw minute count, e.g. `62:00 /mi`, never `H:MM:SS`). Do not reuse or extend `formatSecondsToDuration` for this — write a distinct `formatPace` function.
+- The new pace-computation helper, pace-formatting helper, and `STRAVA_RUN_TYPES` constant belong in `src/lib/units.ts`. Do not create a new file and do not place `STRAVA_RUN_TYPES` in `src/lib/constants.ts` — it is a separate, unrelated constant from `MANUAL_ACTIVITY_TYPES`.
+- `ManualEntryModal.tsx` and the manual-entry form are not touched in any way by this feature — no pace field, no validation change.
+- No leaderboard file, API route, or Prisma schema/migration is touched by this feature.
+- Pace is never persisted; it is computed independently per card on every render with no caching or batching layer.
