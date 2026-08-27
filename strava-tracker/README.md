@@ -36,6 +36,9 @@ with a custom Strava OAuth provider, Tailwind CSS. Deployed on Vercel.
      shared secret used only to validate the webhook handshake.
    - `APP_TIMEZONE` — an IANA timezone string (e.g. `America/New_York`) used
      for all leaderboard time-window boundaries.
+   - `APP_CUTOFF_DATE` (optional) — an ISO 8601 date or date-time string. When
+     set, activities dated before this instant are hidden from the feed and
+     leaderboard. Leave unset to show full history.
 
 5. **Run database migrations**
 

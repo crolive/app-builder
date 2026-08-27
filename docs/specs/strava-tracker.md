@@ -664,4 +664,166 @@ export default function TypeFilter({
 - No new npm dependency is used for the dropdown; it is built with plain React state, a ref, and a `useEffect`-based outside-click listener.
 - `src/app/page.tsx` requires no changes — all filtering, including the new type filter, happens client-side in `DashboardClient` over data already fetched server-side. Do not add query params or server-side filtering.
 - No persistence (URL, localStorage, cookie) of `selectedTypes` across reloads — it resets to empty on every page load, matching `selectedUserIds`'s existing behavior.
+
+## Feature: Feed/Leaderboard Start-From-Cutoff-Date (added 2026-08-26)
+
+## Purpose
+The `strava-tracker` app backfilled a large volume of historical Strava activity on first connect (Feature 6). Now that marathon training is starting, the app owner wants the public feed (`/`) and leaderboard (`/leaderboard`) to show a clean slate of training-cycle-forward activity, without deleting, archiving, or otherwise modifying any historical `Activity` row in storage. This feature adds a single, fixed, app-wide cutoff date, configured via an env var, that hides all activities dated before it from both display surfaces. Success looks like: activities before the configured date never appear in the feed or in any leaderboard time window (including "all-time," which becomes "all-time since cutoff"), while the app remains fully backward-compatible (no cutoff configured = today's exact behavior) and never crashes on a misconfigured value.
+
+## Fits Into Existing System
+This feature integrates with the existing Next.js App Router / Prisma / PostgreSQL stack as follows:
+
+- **New file** `src/lib/cutoff.ts` — a small, dedicated module (analogous in role to `src/lib/timezone.ts`) that owns reading and parsing the new `APP_CUTOFF_DATE` env var. It is a new, standalone dependency of the two page components below; it depends on nothing else in the codebase.
+- **`src/app/page.tsx`** — the feed's server component. Currently calls `prisma.activity.findMany({ orderBy: { startDate: "desc" }, include: { user: true } })` with no date filter. This feature adds a conditional `where: { startDate: { gte: cutoffDate } }` clause, sourced from `getActivityCutoffDate()`.
+- **`src/app/leaderboard/page.tsx`** — the leaderboard's server component. Currently calls `prisma.activity.findMany({ include: { user: true } })` with no date filter, and separately reads `process.env.APP_TIMEZONE ?? "UTC"` inline. This feature adds the same conditional `where` clause to its `findMany` call. The existing inline `APP_TIMEZONE` read is untouched and stays inline, per existing convention — it is a different setting with different validation needs.
+- **`.env.example`** and **`README.md`** — both document `APP_CUTOFF_DATE` alongside the existing `APP_TIMEZONE` entries, following the exact documentation convention already used for `APP_TIMEZONE` (a comment block above the var in `.env.example`; a bullet in the numbered setup list in `README.md`).
+- **No changes** to `src/lib/timezone.ts`, `src/lib/leaderboard.ts`, `src/components/LeaderboardClient.tsx`, `src/components/DashboardClient.tsx`, any file under `src/app/api/`, `src/lib/strava/backfill.ts`, or the Prisma schema. This feature is a query-level, read-time filter only.
+- Existing convention this feature must follow: a single, application-wide setting configured via an `APP_`-prefixed env var, read at server-render time, requiring a redeploy to change, with no in-app admin UI — exactly the `APP_TIMEZONE` precedent (Feature 10).
+
+## Tech Stack & Constraints
+- Language/framework: TypeScript, Next.js (App Router) server components, Prisma + PostgreSQL. No new dependency of any kind.
+- Date parsing uses the native `Date` constructor (`new Date(value)`) — the same primitive already used elsewhere in this codebase (e.g. `src/app/api/activities/route.ts`'s `new Date(body.startDate)`). No date library is introduced.
+- Hard constraints:
+  - Must not delete, modify, exclude-from-storage, or archive any `Activity` row — this is a read-time filter only; all historical rows remain in Postgres untouched.
+  - Must not change the Strava backfill process (`src/lib/strava/backfill.ts`) in any way.
+  - Must not change any API route's contract (`POST /api/activities`, `PATCH /api/activities/:id`, `DELETE /api/activities/:id`, webhook routes, auth routes).
+  - Must not change `LeaderboardClient.tsx`'s or `DashboardClient.tsx`'s props or shape — both continue to receive a plain `PublicActivity[]`, just a pre-filtered one.
+  - Must not add any in-app UI to view, set, or change the cutoff date — env-var-only, exactly like `APP_TIMEZONE`.
+  - Must not add a new npm dependency.
+  - Must remain fully backward-compatible: when `APP_CUTOFF_DATE` is unset, behavior is 100% identical to today (no `where` clause on `startDate` is added).
+  - Must fail safe: a malformed (non-empty, unparseable) `APP_CUTOFF_DATE` value must never crash a page render; it is treated as "no cutoff" plus a logged warning.
+
+## Non-Goals
+1. No in-app UI to view, set, or change the cutoff date. Configuration is `.env`-file-only, changed by editing `.env` and redeploying.
+2. No per-user or per-viewer cutoff customization. This is a single, global setting that applies identically to every viewer of the feed and leaderboard.
+3. No deletion, exclusion-from-storage, archiving, or flagging of pre-cutoff `Activity` rows. They remain in Postgres exactly as they are today; only the two read queries stop returning them.
+4. No change to the Strava backfill process. Full historical ingestion on first connect continues exactly as today.
+5. No change to any API route's request/response contract, including `POST /api/activities`, `PATCH /api/activities/:id`, `DELETE /api/activities/:id`, webhook routes, or auth routes.
+6. No change to `src/lib/timezone.ts` or `src/lib/leaderboard.ts`. Their window-math and aggregation logic requires no cutoff-awareness once the query-level filter is in place.
+7. No change to the leaderboard's metric selector or window selector UI/behavior.
+8. No "rolling last N days" filter. The cutoff is a single fixed floor date that does not move as time passes.
+9. No validation, normalization, or flagging of pre-existing `Activity` rows dated before the cutoff. They are simply excluded from the two read queries, nothing more.
+10. No new npm dependency of any kind.
+
+## Core Behavior
+1. **Operator sets `APP_CUTOFF_DATE`.** When the operator sets `APP_CUTOFF_DATE` in `.env` to a valid ISO 8601 date or date-time string (e.g. `"2026-01-15"` or `"2026-01-15T00:00:00Z"`) and redeploys/restarts the app, all `Activity` rows with `startDate` earlier than the parsed cutoff instant are excluded from both the feed (`/`) and the leaderboard (`/leaderboard`), for every leaderboard time window (1 day, 1 week, 1 month, all-time). Activities with `startDate` equal to or after the cutoff instant are included, subject to each window's own normal rules.
+2. **`APP_CUTOFF_DATE` unset or empty.** When the env var is unset or an empty string, no cutoff is applied: `getActivityCutoffDate()` returns `null`, no `where` clause on `startDate` is added to either `findMany` call, and both the feed and leaderboard behave exactly as they do today (all historical activity visible).
+3. **`APP_CUTOFF_DATE` set to a malformed/unparseable value.** When the env var is set to a non-empty string that does not parse to a valid `Date` (i.e., `new Date(value)` produces `isNaN(date.getTime())`), the app treats this identically to "unset" (no cutoff applied, full history visible) and logs exactly one `console.warn(...)` identifying the misconfigured value, server-side, without crashing the page render or the app.
+4. **"All-time" becomes "all-time since cutoff."** When a cutoff is active, selecting the "all-time" leaderboard window shows aggregated totals computed only over activities on or after the cutoff, because the underlying dataset fetched from the database is already cutoff-bounded before `getLeaderboardWindowRange("all", ...)`'s window math ever runs.
+5. **Cutoff acts as a hard floor even when a window's own start is earlier than the cutoff.** For any of the 1d/1w/1m windows, if the window's normal calendar-based start (e.g. start of the current month in `APP_TIMEZONE`) falls before the cutoff date, the leaderboard for that window still shows only activities on or after the cutoff — never anything earlier — because pre-cutoff rows are never fetched from the database in the first place, so `filterActivitiesByWindow`'s own start-of-window comparison has no pre-cutoff rows left to admit.
+6. **Cutoff has no effect when a window's own start is already after the cutoff.** For any of the 1d/1w/1m windows, if the window's normal calendar-based start falls on or after the cutoff, the leaderboard for that window behaves exactly as it does today (as if no cutoff were configured) — the query-level filter removes no rows the window would have shown anyway.
+7. **Manual activity entries before the cutoff.** A manual activity created via the existing, unchanged `POST /api/activities` with a `startDate` before the cutoff saves successfully (201, no contract change) but never appears in the feed or leaderboard while the cutoff remains active. No error or warning is surfaced to the user who created it; this is expected, correct behavior for a read-time filter.
+8. **Historical data is never touched.** Regardless of cutoff configuration, no `Activity` row is ever deleted, modified, archived, or excluded from storage. All rows remain queryable directly via Prisma/Postgres (e.g. via `npx prisma studio`) outside of the two filtered display queries.
+
+## Data Model
+N/A — no schema, type, or file-format changes. `Activity.startDate` (existing column) is read but not altered; no new column, table, or migration is introduced.
+
+## Interface / API
+
+### New module: `src/lib/cutoff.ts`
+Exports exactly one function:
+
+```ts
+export function getActivityCutoffDate(): Date | null
+```
+
+Behavior:
+- Reads `process.env.APP_CUTOFF_DATE`.
+- If unset or an empty string, returns `null`. Logs nothing.
+- Otherwise, parses it via `new Date(value)`.
+  - If the result is a valid date (`!isNaN(date.getTime())`), returns that `Date`.
+  - If the result is invalid (`isNaN(date.getTime())`), logs one `console.warn(...)` that identifies the bad `APP_CUTOFF_DATE` value, and returns `null`.
+- Never throws under any input.
+- Takes no parameters. Parsing is independent of `APP_TIMEZONE` — a bare date string (e.g. `"2026-01-15"`) is interpreted by `new Date(...)` as UTC midnight, not app-timezone midnight; this is an accepted, documented imprecision (see Open Questions Resolved). Operators who need exact local-midnight alignment should supply a full offset-aware timestamp instead (e.g. `"2026-01-15T05:00:00Z"`).
+
+### Changed call sites
+
+`src/app/page.tsx` — the `prisma.activity.findMany(...)` call gains a conditional `where`:
+
+```ts
+const cutoffDate = getActivityCutoffDate();
+const activityRows = await prisma.activity.findMany({
+  where: cutoffDate ? { startDate: { gte: cutoffDate } } : undefined,
+  orderBy: { startDate: "desc" },
+  include: { user: true },
+});
+```
+
+`src/app/leaderboard/page.tsx` — the `prisma.activity.findMany(...)` call gains the identical conditional `where`:
+
+```ts
+const cutoffDate = getActivityCutoffDate();
+const activityRows = await prisma.activity.findMany({
+  where: cutoffDate ? { startDate: { gte: cutoffDate } } : undefined,
+  include: { user: true },
+});
+```
+
+In both cases: when `cutoffDate` is `null`, no `where` clause is present (or it is `undefined`), and the query is byte-for-byte equivalent to today's unfiltered call. When `cutoffDate` is a `Date`, exactly one clause, `startDate: { gte: cutoffDate } }`, is added; no other query option (`orderBy`, `include`) changes.
+
+No other function signatures, exports, props, or types anywhere in the codebase change as part of this feature.
+
+### New environment variable: `APP_CUTOFF_DATE`
+- Optional. Absent by default (no cutoff), matching today's behavior.
+- Value: an ISO 8601 date or date-time string, e.g. `"2026-01-15"` or `"2026-01-15T00:00:00Z"`.
+- Documented in `.env.example` immediately below the existing `APP_TIMEZONE` entry, in the same comment-then-value style:
+
+```
+# Optional fixed cutoff date (ISO 8601 date or date-time). Activities dated
+# before this instant are hidden from the feed and leaderboard (including
+# "all-time"). Leave unset to show full history. Parsed independent of
+# APP_TIMEZONE (a bare date is UTC midnight); use a full timestamp for
+# local-midnight precision. A malformed value is ignored (logged, no cutoff).
+APP_CUTOFF_DATE="2026-01-15"
+```
+
+- Documented in `README.md`'s numbered env-var setup list (step 4), as a new bullet directly after the existing `APP_TIMEZONE` bullet, e.g.:
+
+```
+- `APP_CUTOFF_DATE` (optional) — an ISO 8601 date or date-time string. When
+  set, activities dated before this instant are hidden from the feed and
+  leaderboard. Leave unset to show full history.
+```
+
+## Acceptance Criteria
+- [ ] `src/lib/cutoff.ts` exists and exports a function `getActivityCutoffDate(): Date | null`, and no other exports.
+- [ ] With `APP_CUTOFF_DATE` unset, `getActivityCutoffDate()` returns `null`.
+- [ ] With `APP_CUTOFF_DATE` set to an empty string, `getActivityCutoffDate()` returns `null`.
+- [ ] With `APP_CUTOFF_DATE` set to a valid ISO date string (e.g. `"2026-01-15"`), `getActivityCutoffDate()` returns a `Date` whose instant matches `new Date("2026-01-15")`.
+- [ ] With `APP_CUTOFF_DATE` set to a valid ISO date-time string (e.g. `"2026-01-15T00:00:00Z"`), `getActivityCutoffDate()` returns a `Date` matching that instant.
+- [ ] With `APP_CUTOFF_DATE` set to an unparseable string (e.g. `"not-a-date"`), `getActivityCutoffDate()` returns `null` and exactly one `console.warn` is logged identifying the bad value.
+- [ ] `getActivityCutoffDate()` does not throw for any of: unset, empty string, valid date, valid date-time, malformed string.
+- [ ] With `APP_CUTOFF_DATE` unset, visiting `/` shows the same set of activities as before this feature was added (full history, no rows hidden).
+- [ ] With `APP_CUTOFF_DATE` unset, visiting `/leaderboard` in every window (1d/1w/1m/all) shows the same results as before this feature was added.
+- [ ] With `APP_CUTOFF_DATE` set to a valid past date, visiting `/` shows no activity with `startDate` earlier than the cutoff, and shows all activities with `startDate` on or after the cutoff.
+- [ ] With `APP_CUTOFF_DATE` set to a valid past date, the leaderboard's "all-time" window aggregates only activities with `startDate` on or after the cutoff.
+- [ ] With `APP_CUTOFF_DATE` set such that the cutoff date falls strictly between the start of the current calendar month (in `APP_TIMEZONE`) and "now" (i.e., cutoff is more recent than the 1-month window's normal start), the leaderboard's "1 month" window shows only activities on or after the cutoff, not activities from the start of the month up to the cutoff.
+- [ ] With `APP_CUTOFF_DATE` set to a date earlier than the start of the current week (in `APP_TIMEZONE`), the leaderboard's "1 week" window behaves identically to having no cutoff configured (the window's own start already excludes everything the cutoff would exclude).
+- [ ] With `APP_CUTOFF_DATE` set to a malformed value, visiting `/` and `/leaderboard` both render successfully (no crash, no error page) and show full, unfiltered history, with a warning present in server logs.
+- [ ] Creating a manual activity via `POST /api/activities` with a `startDate` before an active cutoff still returns 201 and persists the row, but the created activity does not appear on `/` or `/leaderboard` while the cutoff remains active.
+- [ ] Directly querying the `Activity` table (e.g. via `npx prisma studio` or a raw query) shows pre-cutoff rows are still present and unmodified, regardless of cutoff configuration.
+- [ ] `.env.example` contains a documented `APP_CUTOFF_DATE` entry positioned near the existing `APP_TIMEZONE` entry, with an explanatory comment.
+- [ ] `README.md`'s setup instructions include a bullet documenting `APP_CUTOFF_DATE` alongside the existing `APP_TIMEZONE` bullet.
+
+## Regression Safety
+- [ ] With no cutoff configured, the feed (`/`) continues to show every `Activity` row, ordered by `startDate` descending, exactly as before this feature.
+- [ ] With no cutoff configured, the leaderboard (`/leaderboard`) continues to show every `Activity` row across all windows (1d/1w/1m/all), exactly as before this feature.
+- [ ] `DashboardClient` continues to receive a plain `PublicActivity[]` and `users` array with the same shape as before; its person/type filtering UI continues to work unchanged.
+- [ ] `LeaderboardClient` continues to receive `activities`, `users`, and `timeZone` props with the same shapes as before; its metric selector and window selector continue to work unchanged.
+- [ ] `src/lib/timezone.ts` and `src/lib/leaderboard.ts` are unmodified (no diff) and their existing window-math/aggregation behavior for 1d/1w/1m/all is unchanged when no cutoff is configured.
+- [ ] `POST /api/activities`, `PATCH /api/activities/:id`, and `DELETE /api/activities/:id` continue to return the same status codes and response shapes as before this feature, regardless of cutoff configuration.
+- [ ] The Strava webhook and backfill flow (`src/lib/strava/backfill.ts`) continues to ingest and store full historical activity on first connect, unaffected by cutoff configuration.
+- [ ] `process.env.APP_TIMEZONE` continues to be read inline in `src/app/leaderboard/page.tsx` exactly as before, with no change to its default (`?? "UTC"`) or usage.
+
+## Open Questions Resolved
+- Cutoff filtering is implemented at the Prisma query level (`where: { startDate: { gte: cutoffDate } }`) in `src/app/page.tsx` and `src/app/leaderboard/page.tsx`. Do not thread a cutoff parameter into `getLeaderboardWindowRange` or `filterActivitiesByWindow` instead — the query-level approach is confirmed sufficient and `src/lib/timezone.ts`/`src/lib/leaderboard.ts` must remain unmodified.
+- The cutoff-reading and parsing logic lives in one new module, `src/lib/cutoff.ts`, exporting `getActivityCutoffDate(): Date | null`. Do not inline `process.env.APP_CUTOFF_DATE` reads separately at each call site — unlike `APP_TIMEZONE`, this value requires validation and is consumed by two call sites, so a shared helper is required.
+- Parsing uses the native `new Date(value)` constructor only. Do not add a date-parsing library.
+- Parsing `APP_CUTOFF_DATE` is deliberately independent of `APP_TIMEZONE`. A bare date string is interpreted as UTC midnight; this is an accepted one-time imprecision, not a bug to fix. Do not attempt to combine the cutoff parsing with `APP_TIMEZONE`-aware zoned-time logic.
+- Default behavior when `APP_CUTOFF_DATE` is unset is "no cutoff," identical to current full-history behavior. This is final; do not change the default.
+- A malformed (non-empty, unparseable) `APP_CUTOFF_DATE` value must never crash a page render. Treat it as "no cutoff" and log exactly one `console.warn` identifying the bad value. Do not throw, and do not return a 500 or error page for this condition.
+- No changes are required or permitted to `LeaderboardClient.tsx` or `DashboardClient.tsx` — both already accept a plain `PublicActivity[]` with no awareness of how it was filtered.
+- No API route requires any change — none of `/api/activities`, `/api/activities/[id]`, the webhook routes, or auth routes list/return activity collections.
+- No in-app UI for viewing or setting the cutoff is to be added, now or as a follow-up within this feature's scope. Configuration is `.env`-only, matching `APP_TIMEZONE`.
+- A manual activity saved with a pre-cutoff `startDate` silently does not appear in the feed/leaderboard, with no error or explanatory UI surfaced to its creator. This is expected behavior per the display-only nature of the filter, not a defect to fix within this feature.
 - Exact visual details beyond what's specified here (precise panel positioning/width, checkbox iconography, spacing) are left to the developer's discretion within the existing dark-theme design system and existing color tokens — no new colors or design-system additions.
