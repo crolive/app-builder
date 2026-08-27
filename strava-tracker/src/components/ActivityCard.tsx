@@ -23,9 +23,13 @@ export default function ActivityCard({
   const pace = isPaceEligible(activity.source, activity.type)
     ? computeAveragePaceSecondsPerMile(activity.distanceMiles, activity.movingTimeSeconds)
     : null;
+  const isLinkable = activity.source === "strava" && !!activity.stravaActivityId;
 
-  return (
-    <div className="group relative overflow-hidden rounded-card border border-border bg-panel transition duration-150 hover:-translate-y-1 hover:border-border-strong hover:shadow-lift">
+  const cardClassName =
+    "group relative overflow-hidden rounded-card border border-border bg-panel transition duration-150 hover:-translate-y-1 hover:border-border-strong hover:shadow-lift";
+
+  const innerContent = (
+    <>
       <div className={`h-1 w-full ${stripeColor}`} />
       <div className="flex items-start gap-3 p-4">
         <Avatar
@@ -70,6 +74,21 @@ export default function ActivityCard({
           </button>
         )}
       </div>
-    </div>
+    </>
   );
+
+  if (isLinkable) {
+    return (
+      <a
+        href={`https://www.strava.com/activities/${activity.stravaActivityId}`}
+        target="_blank"
+        rel="noopener noreferrer"
+        className={`${cardClassName} block cursor-pointer`}
+      >
+        {innerContent}
+      </a>
+    );
+  }
+
+  return <div className={cardClassName}>{innerContent}</div>;
 }

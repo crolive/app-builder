@@ -22,6 +22,7 @@ export interface PublicActivity {
   movingTimeSeconds: number;
   elapsedTimeSeconds: number;
   startDate: string;
+  stravaActivityId: string | null;
   user: PublicUser;
 }
 
@@ -46,6 +47,7 @@ export function toPublicActivity(activity: Activity & { user: User }): PublicAct
     movingTimeSeconds: activity.movingTimeSeconds,
     elapsedTimeSeconds: activity.elapsedTimeSeconds,
     startDate: activity.startDate.toISOString(),
+    stravaActivityId: activity.stravaActivityId,
     user: toPublicUser(activity.user),
   };
 }

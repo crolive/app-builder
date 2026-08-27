@@ -664,6 +664,7 @@ export default function TypeFilter({
 - No new npm dependency is used for the dropdown; it is built with plain React state, a ref, and a `useEffect`-based outside-click listener.
 - `src/app/page.tsx` requires no changes — all filtering, including the new type filter, happens client-side in `DashboardClient` over data already fetched server-side. Do not add query params or server-side filtering.
 - No persistence (URL, localStorage, cookie) of `selectedTypes` across reloads — it resets to empty on every page load, matching `selectedUserIds`'s existing behavior.
+- Exact visual details beyond what's specified here (precise panel positioning/width, checkbox iconography, spacing) are left to the developer's discretion within the existing dark-theme design system and existing color tokens — no new colors or design-system additions.
 
 ## Feature: Feed/Leaderboard Start-From-Cutoff-Date (added 2026-08-26)
 
@@ -826,4 +827,172 @@ APP_CUTOFF_DATE="2026-01-15"
 - No API route requires any change — none of `/api/activities`, `/api/activities/[id]`, the webhook routes, or auth routes list/return activity collections.
 - No in-app UI for viewing or setting the cutoff is to be added, now or as a follow-up within this feature's scope. Configuration is `.env`-only, matching `APP_TIMEZONE`.
 - A manual activity saved with a pre-cutoff `startDate` silently does not appear in the feed/leaderboard, with no error or explanatory UI surfaced to its creator. This is expected behavior per the display-only nature of the filter, not a defect to fix within this feature.
-- Exact visual details beyond what's specified here (precise panel positioning/width, checkbox iconography, spacing) are left to the developer's discretion within the existing dark-theme design system and existing color tokens — no new colors or design-system additions.
+
+## Feature: Link Feed Cards to Strava (added 2026-08-27)
+
+## Purpose
+Viewers of the strava-tracker activity feed (`/`) currently have no way to jump from a synced Strava activity card to that activity's richer detail page on Strava itself (photos, kudos, comments, splits, maps) without manually searching for it on Strava. This feature makes each `source = "strava"` card in the feed a click target that opens the corresponding activity on strava.com in a new tab, while leaving `source = "manual"` cards (which have no corresponding Strava page) completely unaffected. Success is: a Strava-sourced card, clicked anywhere, opens the correct Strava activity URL in a new tab without disrupting the feed; a manual card behaves exactly as it does today.
+
+## Fits Into Existing System
+This feature touches two files in the existing Next.js App Router / TypeScript / Prisma codebase:
+- `src/lib/serialize.ts` — defines `PublicUser`/`PublicActivity` and the `toPublicUser`/`toPublicActivity` mapping functions that convert Prisma rows into client-safe shapes served to the browser. This feature adds one field to `PublicActivity` and its mapping function.
+- `src/components/ActivityCard.tsx` — the sole component that renders a feed card (used by `src/components/DashboardClient.tsx` in a grid). This feature changes the card's root element conditionally.
+
+It depends on, but does not modify:
+- `prisma/schema.prisma` — `Activity.stravaActivityId` already exists as `String? @unique`; this feature only serializes an already-stored value, it adds no column and no migration.
+- `src/lib/strava/backfill.ts` and `src/lib/strava/webhook.ts` — both already populate `stravaActivityId: String(activity.id)` on every `source = "strava"` row they create/update; this feature relies on that but changes neither file.
+- `src/components/DashboardClient.tsx` — computes `canEdit={activity.source === "manual" && activity.userId === currentUserId}` (line 73), which is confirmed to only ever be `true` for `source === "manual"` activities. This feature does not change this file or this computation; the invariant that a card is never simultaneously Strava-linkable and Edit-able is preserved as a natural consequence of existing logic, not by new code.
+
+This is the first place in the codebase using an external link (`target="_blank"`) or a native `<a>` as a card root — there is no existing in-repo convention to match, so this spec fixes the exact pattern to use (see Interface / API).
+
+## Tech Stack & Constraints
+- TypeScript, Next.js (App Router), React function components, Tailwind CSS — matches existing stack, no changes.
+- No new npm dependency of any kind.
+- No Prisma schema or migration change.
+- No change to any API route contract (`POST /api/activities`, `PATCH/DELETE /api/activities/:id`, webhook routes, auth routes).
+- Must not expose `accessToken`, `refreshToken`, or `tokenExpiresAt` on `PublicUser`/`PublicActivity` — unaffected by this feature, must remain excluded exactly as today.
+- Must not change `DashboardClient.tsx`, `prisma/schema.prisma`, `src/lib/strava/backfill.ts`, `src/lib/strava/webhook.ts`, `PersonFilter.tsx`, `TypeFilter.tsx`, `src/lib/constants.ts`, `src/lib/units.ts`, or `src/lib/leaderboard.ts`.
+- No automated test suite exists for this project (manual QA only, per project convention) — verification is manual/visual.
+
+## Non-Goals
+1. No new icon, badge, or visible "View on Strava" text label — a `cursor-pointer` hover cue alone signals interactivity.
+2. No click behavior of any kind added to `source === "manual"` cards.
+3. No change to the existing `canEdit`/`Edit`-button logic or rendering, in either `DashboardClient.tsx` or `ActivityCard.tsx`.
+4. No change to card layout, spacing, styling, or any rendered content beyond the click/link behavior and the new `stravaActivityId` field passing through the data layer.
+5. No change to any API route contract.
+6. No Prisma schema or migration change.
+7. No new npm dependency.
+8. No exposure of `accessToken`, `refreshToken`, or `tokenExpiresAt`.
+9. No changes to `src/lib/strava/backfill.ts` or `src/lib/strava/webhook.ts`.
+10. No prefetching, validation, or existence-check of the Strava URL before rendering it (e.g. no HEAD request confirming the activity still exists on Strava) — the link is constructed directly from stored data with no verification.
+11. No changes to `PersonFilter.tsx`, `TypeFilter.tsx`, `src/lib/constants.ts`, `src/lib/units.ts`, or `src/lib/leaderboard.ts`.
+12. No new component file — the conditional rendering stays inline in `ActivityCard.tsx`.
+
+## Core Behavior
+1. A feed card whose activity has `source === "strava"` and a non-null `stravaActivityId` is fully clickable: clicking anywhere on the card opens `https://www.strava.com/activities/{stravaActivityId}` in a new browser tab, leaving the feed page open and unnavigated in the original tab.
+2. Such a linkable card shows a `cursor-pointer` mouse cursor when hovered, in addition to the existing hover-lift visual (`hover:-translate-y-1 hover:border-border-strong hover:shadow-lift`), which is preserved unchanged.
+3. A feed card whose activity has `source === "manual"` is not clickable, has no link, and has no `cursor-pointer` — identical to its current behavior. No wrapper element or new class is added to manual cards.
+4. A feed card whose activity has `source === "strava"` but a null `stravaActivityId` (a theoretical edge case not produced by any current ingestion path, but permitted by the schema) is treated exactly like a manual card for the purposes of this feature: not clickable, no link, no `cursor-pointer`, and under no circumstance does the app construct or render a link to `https://www.strava.com/activities/null`.
+5. All existing card content — avatar, name, disconnected badge, source badge, title, type, distance/time/date/pace metadata, and (for eligible manual cards) the Edit button — renders identically regardless of whether the card is linkable, with no content added, removed, or repositioned.
+6. The card's existing hover-lift, border, and rounded-corner classes apply identically whether the card renders as a `<div>` (non-linkable) or an `<a>` (linkable) — the visual box looks the same in both cases aside from the cursor affordance on linkable cards.
+
+## Data Model
+Additive change to the client-facing serialization shape only — no Prisma schema or migration change (the underlying `Activity.stravaActivityId` column already exists as `String? @unique`).
+
+In `src/lib/serialize.ts`:
+- `PublicActivity` gains a new field: `stravaActivityId: string | null`.
+- `toPublicActivity()` populates it as a direct, untransformed pass-through: `stravaActivityId: activity.stravaActivityId`.
+
+No other field, type, or file format changes.
+
+## Interface / API
+
+**`src/lib/serialize.ts`** — exact diff:
+
+```ts
+export interface PublicActivity {
+  id: string;
+  userId: string;
+  source: "strava" | "manual";
+  type: string;
+  title: string;
+  distanceMiles: number;
+  movingTimeSeconds: number;
+  elapsedTimeSeconds: number;
+  startDate: string;
+  stravaActivityId: string | null;   // new field
+  user: PublicUser;
+}
+```
+
+```ts
+export function toPublicActivity(activity: Activity & { user: User }): PublicActivity {
+  return {
+    id: activity.id,
+    userId: activity.userId,
+    source: activity.source,
+    type: activity.type,
+    title: activity.title,
+    distanceMiles: activity.distanceMiles,
+    movingTimeSeconds: activity.movingTimeSeconds,
+    elapsedTimeSeconds: activity.elapsedTimeSeconds,
+    startDate: activity.startDate.toISOString(),
+    stravaActivityId: activity.stravaActivityId,   // new field, direct pass-through
+    user: toPublicUser(activity.user),
+  };
+}
+```
+
+Field position within the object literal is not load-bearing (object key order doesn't affect behavior); placing it adjacent to `startDate` as shown is acceptable but not required.
+
+**`src/components/ActivityCard.tsx`** — exact structure:
+
+1. Compute, alongside the existing `stripeColor`/`startDate`/`pace` local variables:
+   ```ts
+   const isLinkable = activity.source === "strava" && !!activity.stravaActivityId;
+   ```
+2. Define the shared class string currently on the root `<div>`, unchanged:
+   ```ts
+   const cardClassName =
+     "group relative overflow-hidden rounded-card border border-border bg-panel transition duration-150 hover:-translate-y-1 hover:border-border-strong hover:shadow-lift";
+   ```
+3. Extract the card's existing inner content — the stripe `<div className={`h-1 w-full ${stripeColor}`} />` and the flex content row (`<div className="flex items-start gap-3 p-4">...</div>`, including `Avatar`, text/badges/metadata, and the conditional `Edit` button) — into a single JSX expression (e.g. a `const innerContent = (<>...</>);` fragment), with no change to any of that markup.
+4. Render conditionally:
+   - When `isLinkable` is `true`:
+     ```tsx
+     <a
+       href={`https://www.strava.com/activities/${activity.stravaActivityId}`}
+       target="_blank"
+       rel="noopener noreferrer"
+       className={`${cardClassName} block cursor-pointer`}
+     >
+       {innerContent}
+     </a>
+     ```
+   - When `isLinkable` is `false`:
+     ```tsx
+     <div className={cardClassName}>
+       {innerContent}
+     </div>
+     ```
+5. No other prop, export, or function signature of `ActivityCard` changes. The component's external props type (`{ activity: PublicActivity; canEdit: boolean; onEdit?: (activity: PublicActivity) => void }`) is unchanged.
+
+No API route, endpoint, or CLI interface is added or changed by this feature.
+
+## Acceptance Criteria
+- [ ] `PublicActivity` in `src/lib/serialize.ts` includes `stravaActivityId: string | null`.
+- [ ] `toPublicActivity()` sets `stravaActivityId` to `activity.stravaActivityId` with no transformation or default substitution.
+- [ ] A feed card for an activity with `source === "strava"` and a non-null `stravaActivityId` renders as a native `<a>` element (not a `<div>`) with `href="https://www.strava.com/activities/{stravaActivityId}"`, `target="_blank"`, and `rel="noopener noreferrer"`.
+- [ ] Clicking anywhere within such a linkable card's rendered area opens the Strava URL in a new browser tab, and the original feed tab remains on the feed page (no full-page navigation away from `/`).
+- [ ] A linkable card shows a `cursor-pointer` cursor on hover.
+- [ ] A linkable card retains the existing hover-lift effect (`hover:-translate-y-1 hover:border-border-strong hover:shadow-lift`), border, and rounded corners identical to a non-linkable card's appearance.
+- [ ] A linkable `<a>`-rendered card does not collapse to inline/content-sized dimensions — it fills its grid cell exactly as the `<div>` version does (verifying `block` is applied).
+- [ ] A feed card for an activity with `source === "manual"` renders as a `<div>` (unchanged from current behavior), with no `href`, no `target`, no click behavior, and no `cursor-pointer`.
+- [ ] A feed card for an activity with `source === "strava"` and `stravaActivityId === null` renders as a `<div>` (not an `<a>`), with no click behavior, no `cursor-pointer`, and does not construct or render any `href` containing `.../activities/null` or `.../activities/undefined`.
+- [ ] All existing card content (avatar, name, disconnected badge, source badge, title, type, distance, moving time, date, pace when eligible) renders identically in both the linkable and non-linkable render paths, with no visual or structural difference beyond the root element tag and the `block cursor-pointer` classes.
+- [ ] For a `source === "manual"` activity where `canEdit` is `true`, the Edit button still renders and its `onClick` still invokes `onEdit` exactly as before.
+- [ ] `ActivityCard`'s props type (`activity`, `canEdit`, `onEdit`) is unchanged from before this feature.
+- [ ] No new npm dependency appears in `package.json`/`package-lock.json` as a result of this feature.
+- [ ] No changes exist to `prisma/schema.prisma`, `src/lib/strava/backfill.ts`, `src/lib/strava/webhook.ts`, or `src/components/DashboardClient.tsx`.
+
+## Regression Safety
+- [ ] `DashboardClient.tsx`'s `canEdit={activity.source === "manual" && activity.userId === currentUserId}` computation and its pass-through to `ActivityCard` remain unchanged and continue to gate the Edit button exactly as before.
+- [ ] The activity feed grid layout (`grid grid-cols-1 gap-4 sm:grid-cols-2`) and card sizing within it are unaffected — linkable cards fill their grid cell the same way non-linkable cards do.
+- [ ] Person filter (`PersonFilter.tsx`) and type filter (`TypeFilter.tsx`) continue to filter the visible activity list correctly; neither component nor its interaction with `DashboardClient.tsx` is affected by the card-level change.
+- [ ] The manual entry/edit modal flow (`ManualEntryModal.tsx`, opened via `openAdd`/`openEdit` in `DashboardClient.tsx`) continues to work unchanged for manual activities.
+- [ ] `toPublicUser`/`PublicUser` and all other `PublicActivity` fields (`id`, `userId`, `source`, `type`, `title`, `distanceMiles`, `movingTimeSeconds`, `elapsedTimeSeconds`, `startDate`, `user`) remain present and correctly populated, unaffected by the addition of `stravaActivityId`.
+- [ ] `accessToken`, `refreshToken`, and `tokenExpiresAt` remain absent from every client-facing response (`PublicUser`, `PublicActivity`), unaffected by this feature.
+- [ ] Average pace display on cards (added by a prior feature) continues to render correctly for pace-eligible activities on both linkable and non-linkable cards.
+- [ ] The "Disconnected" badge and source badge (`strava`/`manual`) continue to render under the same conditions as before.
+
+## Open Questions Resolved
+- `stravaActivityId` is added to `PublicActivity` as `string | null`, matching the Prisma column's nullable type exactly, and mapped straight through in `toPublicActivity()` with no transformation and no default-value substitution for null.
+- The Strava activity URL is always `https://www.strava.com/activities/{stravaActivityId}`, built by direct string interpolation of the already-string `stravaActivityId` value — no other URL format, query string, or path is used.
+- The whole-card click target is implemented by conditionally rendering the card's root as an `<a>` (linkable case) instead of a `<div>` (non-linkable case) — not by adding an `onClick` handler or `window.open` call to a `<div>`. This native-`<a>` approach is required because it is semantic, keyboard-focusable, screen-reader-friendly, gets native middle-click/Ctrl-click/right-click "open in new tab" behavior for free, and carries no popup-blocker risk — a `div`+`onClick`+`window.open` approach is explicitly rejected.
+- Eligibility for the link/click behavior is exactly `activity.source === "strava" && activity.stravaActivityId != null` — both conditions are required together; do not relax or reinterpret this condition (e.g. do not link based on `source` alone).
+- `source === "manual"` cards must receive no new wrapper element and no new classes — do not introduce any conditional wrapper logic on the manual-card path beyond what already exists.
+- The `Edit` button and the new card-level link are mutually exclusive by construction (confirmed via direct read of `DashboardClient.tsx`: `canEdit` is only ever `true` for `source === "manual"`, and `source === "manual"` cards are never linkable) — do not add any logic to handle a card being simultaneously linkable and Edit-able, since this scenario cannot occur under current invariants and none of this feature's changes alter `canEdit`'s computation.
+- The full existing class list on the card root (`group relative overflow-hidden rounded-card border border-border bg-panel transition duration-150 hover:-translate-y-1 hover:border-border-strong hover:shadow-lift`) must move verbatim onto whichever element (`<a>` or `<div>`) is rendered, via one shared class-string variable, with only `block cursor-pointer` appended on the `<a>` path. Do not restyle, reorder, or drop any existing class.
+- `block` must be added on the `<a>` path specifically because anchor elements are inline by default and would otherwise collapse to their content's inline width/height, breaking the card's block-level box (grid cell fill, rounded corners, full-width border). Do not omit this class or substitute a different display strategy (e.g. `display: block` via inline style, or `inline-block`).
+- No existing in-repo convention exists for external links or `target="_blank"`; the pattern specified in this document (native `<a>`, `target="_blank"`, `rel="noopener noreferrer"`) is the one to follow — do not search for or invent an alternative in-repo precedent.
+- The developer should visually verify (e.g., via the `run` skill) that no default browser anchor styling (underline, blue link color) leaks through on linkable cards, since this is the first `<a>`-as-card-root pattern in this codebase; if Tailwind's Preflight reset does not fully suppress it, no additional class beyond what's specified here is authorized without re-confirming with this spec — treat any leak as a bug in applying the existing (unchanged) class list, not a reason to add new styling.
