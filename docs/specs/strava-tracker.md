@@ -996,3 +996,329 @@ No API route, endpoint, or CLI interface is added or changed by this feature.
 - `block` must be added on the `<a>` path specifically because anchor elements are inline by default and would otherwise collapse to their content's inline width/height, breaking the card's block-level box (grid cell fill, rounded corners, full-width border). Do not omit this class or substitute a different display strategy (e.g. `display: block` via inline style, or `inline-block`).
 - No existing in-repo convention exists for external links or `target="_blank"`; the pattern specified in this document (native `<a>`, `target="_blank"`, `rel="noopener noreferrer"`) is the one to follow — do not search for or invent an alternative in-repo precedent.
 - The developer should visually verify (e.g., via the `run` skill) that no default browser anchor styling (underline, blue link color) leaks through on linkable cards, since this is the first `<a>`-as-card-root pattern in this codebase; if Tailwind's Preflight reset does not fully suppress it, no additional class beyond what's specified here is authorized without re-confirming with this spec — treat any leak as a bug in applying the existing (unchanged) class list, not a reason to add new styling.
+
+## Feature: Comments and Reactions on Feed Activities (added 2026-08-31)
+
+
+## Purpose
+strava-tracker's public activity feed (`/`) currently shows workouts with no way for the app's small group of allowlisted, logged-in members to react to or discuss them. This feature adds a social layer — plain-text comments and a fixed set of five emoji reactions — to every feed activity, whether it came from Strava or was entered manually. It is for the app's existing allowlisted members (2-4 people, per the plan's stated scale) who want to acknowledge or comment on each other's workouts (e.g. leave a 🔥 on a friend's run) without leaving the feed. Success looks like: every activity card shows live reaction counts and a comment count at a glance; any logged-in member can react/comment on any activity (not just their own); comments and reactions are visible to everyone including logged-out visitors; and all of this coexists cleanly with the just-shipped whole-card Strava links without breaking click-to-Strava, hover-lift, or grid layout.
+
+## Fits Into Existing System
+This is strava-tracker's first feature requiring a schema migration beyond `init`, three new API route files, and a restructuring of `ActivityCard.tsx`. It touches:
+- `prisma/schema.prisma` — adds `Comment`, `Reaction` models and a `ReactionEmoji` enum, plus back-relations on `Activity` and `User`. This is the first non-`init` migration in `prisma/migrations/` (currently only `20260824221244_init` exists).
+- `src/lib/serialize.ts` — the established client-safe shape boundary; extends `PublicActivity` and adds `PublicComment`/`PublicReactionSummary` types, following the existing pattern of plain serialization functions.
+- `src/app/page.tsx` — the server component that assembles feed data; gains a session lookup and extended Prisma `include`, following its existing `Promise.all` structure.
+- `src/lib/constants.ts` — the project's established home for fixed-taxonomy lookups (alongside `MANUAL_ACTIVITY_TYPES`); gains the emoji display lookup.
+- `src/components/ActivityCard.tsx` — restructured so a new footer component can render as a DOM sibling of the existing whole-card `<a>`/`<div>`, without touching `DashboardClient.tsx`.
+- New routes follow the existing auth/ownership/error-shape conventions already established by `src/app/api/activities/route.ts` and `src/app/api/activities/[id]/route.ts` (`getServerSession(authOptions)` → 401; `findUnique` → 404; ownership check → 403; JSON body responses, never 204).
+- The new `ActivityFooter.tsx` component follows the precedent set by `ManualEntryModal.tsx` for fetch-based mutations and its "Delete" → "Confirm Delete" button-swap pattern (no `window.confirm()`), and follows `DashboardClient.tsx`'s precedent of calling `useSession()`/`useRouter()` directly in a client component rather than threading props.
+
+## Tech Stack & Constraints
+- Language/framework: TypeScript, Next.js (App Router), React client/server components — unchanged.
+- Persistence: Prisma + PostgreSQL (Neon) — unchanged. This feature adds the project's first non-`init` migration.
+- Auth: NextAuth (Strava OAuth, JWT session strategy), via `getServerSession(authOptions)` from `@/lib/auth` — unchanged, reused as-is.
+- Styling: Tailwind, following the existing dark-theme design system (`font-mono uppercase tracking-widest` labels, pill buttons, `accent-positive` green / `accent-alert` red tokens).
+- Hard constraints:
+  - No new npm dependency of any kind (no emoji-picker library, no toast/dialog library, no confirm library).
+  - Must not change any existing API route's request/response contract for status codes or existing fields — only additive new fields (`reactions`, `commentCount`) on `PublicActivity`, and brand-new route files.
+  - Must not change `DashboardClient.tsx`, `src/app/api/activities/route.ts`, `src/app/api/activities/[id]/route.ts`, `src/lib/leaderboard.ts`, or `ManualEntryModal.tsx`'s own behavior.
+  - `ActivityCard.tsx`'s external prop signature (`activity`, `canEdit`, `onEdit`) must not change.
+  - `Comment.activityId` and `Reaction.activityId` must use `onDelete: Cascade` so the existing `DELETE /api/activities/:id` route continues to work unmodified when deleting a manual activity that has comments/reactions.
+  - Must preserve full-card click-to-Strava, hover-lift over the whole visual card, and grid-cell fill behavior from the "Link Feed Cards to Strava" feature, even though the literal DOM nesting from that feature's spec changes.
+
+## Non-Goals
+1. Push notifications or email alerts for new comments/reactions.
+2. Nested replies/threading — comments are a flat, single-level, chronologically-ordered (oldest-first) list per activity.
+3. Rich text, markdown, @mentions, or image attachments in comments — plain text only, max 2000 characters.
+4. Real-time/live updates (websockets, polling, SSE) — new comments/reactions appear only after `router.refresh()` (page-level) or the footer's own local re-fetch (comment list).
+5. Any moderation UI or capability beyond a comment's own author deleting their own comment — no admin override, no activity-owner moderation power over others' comments.
+6. Any new npm dependency.
+7. Any change to `src/lib/leaderboard.ts`, leaderboard UI, or leaderboard aggregation.
+8. Any change to the manual-entry add/edit/delete flow itself (`ManualEntryModal.tsx`'s existing behavior, or the existing contracts of `POST`/`PATCH`/`DELETE /api/activities[/:id]`) beyond `ActivityCard.tsx` now also rendering the new footer on manual cards.
+9. Any change to any existing API route's status codes or existing response fields.
+10. Showing who reacted (no reactor-name tooltip/list) — counts only.
+11. An "edited" indicator or edit-history timestamp on edited comments (`updatedAt` is stored but not surfaced in the UI).
+12. Rate limiting, spam prevention, or profanity filtering on comments/reactions.
+13. Pagination, "load more," or infinite scroll for comments — the full flat list loads at once per activity when expanded.
+14. Allowing a user to react more than once with the *same* emoji on the same activity (prevented at the DB layer via the unique constraint). Picking multiple *different* emoji on the same activity remains fully supported.
+15. A separate in-app allowlist re-check in new routes — an existing session already implies allowlisted membership (see Open Questions Resolved).
+
+## Core Behavior
+1. **Viewing reactions and comment count (any visitor, including logged out).**
+   Every activity card in the feed shows a footer with all five reaction emoji (👍 🔥 💪 🎉 👏) each with its current count (0 if nobody has reacted), and a "N comments" toggle showing the current total comment count. This is true for both `source = "strava"` and `source = "manual"` cards, and for activities with zero reactions/comments (footer is always rendered, never hidden).
+2. **Logged-in member adds a reaction.**
+   A logged-in member clicks a reaction emoji they have not yet picked on that activity. The reaction is recorded, and after the next `router.refresh()` the emoji's count increases by 1 and it renders in a highlighted/"reacted by me" state for that member. Clicking the same emoji twice in quick succession (double-click/race) does not error — the second request is treated as an idempotent success.
+3. **Logged-in member removes a reaction.**
+   A logged-in member clicks a reaction emoji they have already picked on that activity. The reaction is removed; after refresh the count decreases by 1 and the highlighted state clears. Clicking to remove a reaction that is already gone (double-click/race, or removed in another tab) does not error — treated as an idempotent success.
+4. **Logged-in member picks multiple different emoji on the same activity.**
+   A member may hold reactions of more than one distinct emoji on the same activity simultaneously (e.g. both 🔥 and 👏). Each is independent; adding/removing one does not affect the others.
+5. **Logged-out visitor views reactions.**
+   Reaction buttons render as non-interactive (no click handler/hover affordance) for a visitor with no session — consistent with the app's existing pattern of hiding/disabling authenticated-only affordances rather than prompting login.
+6. **Expanding the comment list.**
+   Any visitor (logged in or not) can click the "N comments" toggle to expand a card's footer. On first expand, the full flat list of comments for that activity is fetched from `GET /api/activities/{id}/comments` and rendered in chronological ascending order (oldest first). Subsequent expand/collapse on the same card does not re-fetch unless a write (add/edit/delete) just occurred.
+7. **Logged-in member adds a comment.**
+   A logged-in member types into the add-comment textarea (visible only when expanded and logged in) and submits a non-empty, trimmed body up to 2000 characters. On success, the comment is created attached to the current user and the expanded list is re-fetched immediately (independent of `router.refresh()`) so the new comment appears without waiting for the page-level refresh; the page-level comment count also updates on the next `router.refresh()`. Submitting an empty/whitespace-only body, or a body over 2000 characters, is rejected client- and server-side.
+8. **Any logged-in member comments on any activity, including someone else's.**
+   There is no ownership restriction on which activities can be commented on — a member may comment on an activity owned by a different user.
+9. **Logged-in member edits their own comment.**
+   A comment owned by the current user shows an inline "Edit" affordance. Editing and submitting a new non-empty, trimmed body (≤2000 chars) updates the comment and re-fetches the expanded list. A member cannot see an edit affordance on another member's comment.
+10. **Logged-in member deletes their own comment.**
+    A comment owned by the current user shows a "Delete" button that arms into "Confirm Delete" on first click (mirroring `ManualEntryModal.tsx`'s existing pattern — no `window.confirm()`). Clicking "Confirm Delete" deletes the comment and re-fetches the expanded list, decrementing the visible comment count on the next refresh. A member cannot see a delete affordance on another member's comment.
+11. **Unauthenticated write attempts.**
+    Any attempt to `POST`/`PATCH`/`DELETE` a comment or `POST`/`DELETE` a reaction without a session is rejected with 401 and produces no data change. In the UI, write affordances (add-comment textarea, edit/delete on comments, interactive reaction buttons) are not shown to logged-out visitors in the first place.
+12. **Deleting a manual activity that has comments/reactions.**
+    Deleting a manual activity via the existing `DELETE /api/activities/:id` route also deletes all of its `Comment` and `Reaction` rows (via `onDelete: Cascade`) without error, and without the route's existing "row already gone" catch block misfiring into a spurious 404.
+13. **Whole-card Strava link and hover-lift preserved.**
+    On a `source = "strava"` card with a `stravaActivityId`, clicking anywhere in the card's original content region (stripe, avatar, name, metadata, badges) still opens the Strava activity in a new tab as before. Hovering anywhere over the full visual card (including the new footer area) still shows the lift/border-highlight hover effect on the whole card. Clicking a reaction button or the comments toggle in the footer does not navigate to Strava.
+
+## Data Model
+Prisma schema changes (`prisma/schema.prisma`), to be captured in a new migration (the first non-`init` migration for this project):
+
+```prisma
+enum ReactionEmoji {
+  THUMBS_UP
+  FIRE
+  MUSCLE
+  PARTY
+  CLAP
+}
+
+model Comment {
+  id         String   @id @default(cuid())
+  activityId String
+  activity   Activity @relation(fields: [activityId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User     @relation(fields: [userId], references: [id])
+  body       String
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([activityId])
+}
+
+model Reaction {
+  id         String        @id @default(cuid())
+  activityId String
+  activity   Activity      @relation(fields: [activityId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User          @relation(fields: [userId], references: [id])
+  emoji      ReactionEmoji
+  createdAt  DateTime      @default(now())
+
+  @@unique([activityId, userId, emoji])
+}
+```
+
+Additions to existing models:
+- `Activity` gains `comments Comment[]` and `reactions Reaction[]` back-relation fields.
+- `User` gains `comments Comment[]` and `reactions Reaction[]` back-relation fields.
+
+Notes:
+- `Comment.activityId` and `Reaction.activityId` use `onDelete: Cascade` — required, not optional (see Regression Safety).
+- `userId` relations on both new models use Prisma's default behavior (no `onDelete` override) — strava-tracker has no user-delete feature, so this is not exercised.
+- `Reaction.emoji` is the `ReactionEmoji` enum (not a free-text `String`), following the existing convention of enums for fixed sets (`ActivitySource`, `ConnectionStatus`).
+- The `@@unique([activityId, userId, emoji])` constraint on `Reaction` is both the data-integrity guarantee (one row per person/emoji/activity) and the lookup key used by the add/remove routes.
+- The migration must be generated via the Prisma CLI (`prisma migrate dev`) against these schema changes — no hand-written SQL.
+
+## Interface / API
+
+### `src/lib/constants.ts` additions
+```ts
+export const REACTION_EMOJI: Record<ReactionEmoji, string> = {
+  THUMBS_UP: "👍",
+  FIRE: "🔥",
+  MUSCLE: "💪",
+  PARTY: "🎉",
+  CLAP: "👏",
+};
+
+export const REACTION_EMOJI_ORDER: ReactionEmoji[] = [
+  "THUMBS_UP",
+  "FIRE",
+  "MUSCLE",
+  "PARTY",
+  "CLAP",
+];
+```
+(`ReactionEmoji` imported from `@prisma/client`.) This fixes both the glyph mapping and the display order used everywhere reactions are rendered or defaulted.
+
+### `src/lib/serialize.ts` changes
+New types:
+```ts
+export interface PublicReactionSummary {
+  emoji: ReactionEmoji;
+  count: number;
+  reactedByMe: boolean;
+}
+
+export interface PublicComment {
+  id: string;
+  activityId: string;
+  userId: string;
+  body: string;
+  createdAt: string;
+  updatedAt: string;
+  user: PublicUser;
+}
+```
+
+`PublicActivity` gains:
+```ts
+reactions: PublicReactionSummary[]; // always all 5 emoji, in REACTION_EMOJI_ORDER, count 0 default
+commentCount: number;
+```
+
+New function:
+```ts
+export function toPublicComment(comment: Comment & { user: User }): PublicComment
+```
+Maps directly (id, activityId, userId, body, createdAt/updatedAt as ISO strings, user via `toPublicUser`).
+
+`toPublicActivity()` signature changes to:
+```ts
+export function toPublicActivity(
+  activity: Activity & {
+    user: User;
+    reactions?: Reaction[];
+    _count?: { comments?: number };
+  },
+  currentUserId?: string | null
+): PublicActivity
+```
+Behavior:
+- `currentUserId` is optional and defaults to `undefined`/absent — every existing call site that passes only one argument (`src/app/api/activities/route.ts`, `src/app/api/activities/[id]/route.ts`) must keep compiling and behave exactly as before (empty `reactions: []` with all counts 0, `reactedByMe: false`, and `commentCount: 0`).
+- When `activity.reactions` is present, builds the `reactions` array by iterating `REACTION_EMOJI_ORDER`: for each emoji, `count` is the number of matching rows in `activity.reactions`, and `reactedByMe` is `true` iff a row for that emoji has `userId === currentUserId` (false when `currentUserId` is null/undefined).
+- When `activity.reactions` is absent, defaults `reactions` to an array of all 5 emoji with `count: 0, reactedByMe: false`.
+- `commentCount` is `activity._count?.comments ?? 0`.
+
+### `src/app/page.tsx` changes
+- Adds `getServerSession(authOptions)` (from `next-auth` / `@/lib/auth`) to the existing `Promise.all`, resolving `currentUserId = session?.user?.id ?? null`.
+- Extends the `prisma.activity.findMany` call's `include` to:
+  ```ts
+  include: {
+    user: true,
+    reactions: true,
+    _count: { select: { comments: true } },
+  }
+  ```
+- Changes `activityRows.map(toPublicActivity)` to `activityRows.map((a) => toPublicActivity(a, currentUserId))`.
+- No other changes to `page.tsx` (cutoff-date filtering, `userRows` query, `DashboardClient` invocation stay as-is).
+
+### New route: `src/app/api/activities/[id]/comments/route.ts`
+- `GET` — no auth check (public). 404 if the activity does not exist. On success, `200` with a JSON array of `PublicComment`, ordered `createdAt` ascending (chronological, oldest first), including the `user` relation.
+- `POST` — `getServerSession(authOptions)`; 401 if no session. 404 if the activity does not exist (`prisma.activity.findUnique`). Parses JSON body `{ body: string }`; 400 on invalid JSON. Validates: `body.trim()` is non-empty and ≤2000 characters — 400 with a JSON `{ error: string }` otherwise. On success, creates a `Comment` with `activityId` from the route param, `userId: session.user.id`, and the trimmed body; returns `201` with the serialized `PublicComment` (including `user`).
+- No ownership restriction — any authenticated user may `POST` a comment on any activity's id.
+
+### New route: `src/app/api/comments/[id]/route.ts`
+- `PATCH` — `getServerSession(authOptions)`; 401 if no session. `prisma.comment.findUnique` by route id; 404 if not found. 403 if `comment.userId !== session.user.id`. Parses JSON body `{ body: string }`; 400 on invalid JSON. Validates non-empty trimmed body ≤2000 characters; 400 otherwise. Updates `body` (and `updatedAt` via Prisma's `@updatedAt`); returns `200` with the serialized `PublicComment`.
+- `DELETE` — `getServerSession(authOptions)`; 401 if no session. `findUnique` by route id; 404 if not found. 403 if `comment.userId !== session.user.id`. Deletes the comment; wraps the delete call so a "row already gone" race (e.g. concurrent delete) is caught and returns 404 rather than a raw 500 — mirroring the existing activity-delete pattern in `src/app/api/activities/[id]/route.ts`. On success, `200` with `{ success: true }`.
+
+### New route: `src/app/api/activities/[id]/reactions/route.ts`
+- `POST` — `getServerSession(authOptions)`; 401 if no session. 404 if the activity does not exist. Parses JSON body `{ emoji: string }`; 400 if `emoji` is not one of the 5 valid `ReactionEmoji` values. Attempts `prisma.reaction.create` with `activityId`, `userId: session.user.id`, `emoji`. If the create succeeds, returns `201` with `{ success: true }`. If it fails specifically due to the `[activityId, userId, emoji]` unique constraint (Prisma error code `P2002`), treats it as an idempotent success and returns `200` with `{ success: true }` (not an error). Any other failure is a genuine 500.
+- `DELETE` — `getServerSession(authOptions)`; 401 if no session. Parses JSON body (or query — implementer's choice, but must be documented/consistent) `{ emoji: string }`; 400 if `emoji` is not one of the 5 valid values. Deletes the row matching `(activityId, userId: session.user.id, emoji)` if present. Whether a row existed or not, returns `200` with `{ success: true }` — "no such row" is an idempotent success, never a 404. (Note: this route does not need to 404-check activity existence first, since a delete-by-composite-key on a nonexistent activity simply matches zero rows, which is already the idempotent-success path.)
+
+### New component: `src/components/ActivityFooter.tsx`
+Props: takes the activity's data needed to render (at minimum `activityId: string`, `reactions: PublicReactionSummary[]`, `commentCount: number` — implementer may pass the full `PublicActivity` as a single prop instead, developer's choice, as long as no new prop is threaded through `ActivityCard`'s or `DashboardClient`'s other call sites beyond what `ActivityCard` already receives via its `activity` prop).
+Behavior:
+- Reads the current user via `useSession()` directly (not via a prop) and gets `useRouter()` directly, matching `DashboardClient.tsx`'s existing pattern.
+- Always renders: a row of the 5 reaction emoji (in `REACTION_EMOJI_ORDER`) each showing its glyph and count; and a "N comments" clickable toggle (`N` = `commentCount`).
+- When logged in, each reaction button is clickable: click calls `POST` or `DELETE` on `/api/activities/{activityId}/reactions` with `{ emoji }` depending on current `reactedByMe` state, then calls `router.refresh()` on success. When logged out, reaction buttons render non-interactively (no click handler, no hover state).
+- A reaction the current user has picked (`reactedByMe: true`) renders in a visually highlighted state (e.g. `accent-positive`-toned) distinct from unreacted emoji.
+- Clicking "N comments" toggles local expand/collapse state. On first expand for a given activity, fetches `GET /api/activities/{activityId}/comments`, caches the result in local component state, and renders the returned list. Subsequent collapse/expand does not re-fetch unless a write just happened.
+- When expanded and logged in, renders an add-comment `<textarea>` + submit control below/above the list; submitting calls `POST /api/activities/{activityId}/comments`, and on success re-fetches the comment list and calls `router.refresh()`.
+- When expanded and logged out, the add-comment textarea is not rendered (view-only).
+- Each rendered comment whose `userId` matches the current session's user id shows inline "Edit" (switches that comment into an editable textarea, submits via `PATCH /api/comments/{id}`) and "Delete" → "Confirm Delete" (armed on first click, deletes via `DELETE /api/comments/{id}` on second click, reusing `ManualEntryModal.tsx`'s exact arm/confirm button-swap pattern — no `window.confirm()`). Both re-fetch the comment list and call `router.refresh()` on success.
+- Comments not owned by the current user (or all comments, when logged out) show no edit/delete affordance.
+- All click handlers on reaction buttons, the comments toggle, and everything inside the expanded panel must not trigger the ancestor `<a>`'s navigation (achieved structurally per the `ActivityCard.tsx` restructuring below, not via `stopPropagation`/`preventDefault` hacks).
+
+### `src/components/ActivityCard.tsx` restructuring
+- The existing `cardClassName` string (box styling: border, rounding, hover-lift, background) moves off the `<a>`/`<div>` that wraps `innerContent` and onto a new, always-present outer `<div>` that is the component's actual root/grid-filling element.
+- That outer `<div className={cardClassName}>` contains two siblings, in order:
+  1. The existing conditional: an `<a href=... target="_blank" rel="noopener noreferrer" className="block cursor-pointer">{innerContent}</a>` when `isLinkable`, else `<div>{innerContent}</div>` (the reduced class list here drops the box-styling classes now on the outer wrapper, keeping only what's needed to make the inner content itself clickable/blocked).
+  2. `<ActivityFooter ... />`, rendered unconditionally, as a true DOM sibling of the `<a>`/inner-content `<div>`, never nested inside the `<a>`. This applies identically for `source = "strava"` and `source = "manual"` cards.
+- `innerContent`'s own markup (stripe, avatar, name, badges, metadata, Edit button) is unchanged. The `isLinkable` computation is unchanged. `ActivityCard`'s external props (`activity`, `canEdit`, `onEdit`) are unchanged.
+- Net effect: hovering/clicking within `innerContent` behaves exactly as before (opens Strava in a new tab if linkable); hovering anywhere in the outer `<div>` (including over the footer) triggers the hover-lift styling since that's now on the outer element; clicking within `ActivityFooter` never navigates to Strava because it is structurally outside the `<a>`.
+
+## Acceptance Criteria
+- [ ] `prisma/schema.prisma` defines `enum ReactionEmoji` with exactly the 5 values `THUMBS_UP`, `FIRE`, `MUSCLE`, `PARTY`, `CLAP`.
+- [ ] `prisma/schema.prisma` defines `model Comment` with fields `id` (cuid), `activityId`, `userId`, `body` (String), `createdAt`, `updatedAt`, and `@@index([activityId])`.
+- [ ] `prisma/schema.prisma` defines `model Reaction` with fields `id` (cuid), `activityId`, `userId`, `emoji` (ReactionEmoji), `createdAt`, and `@@unique([activityId, userId, emoji])`.
+- [ ] `Comment.activityId` and `Reaction.activityId` relations are declared with `onDelete: Cascade`.
+- [ ] `Activity` and `User` models each gain `comments Comment[]` and `reactions Reaction[]` back-relation fields.
+- [ ] A new Prisma migration exists in `prisma/migrations/` (beyond `20260824221244_init`) that creates the `Comment`/`Reaction` tables and `ReactionEmoji` enum, generated via the Prisma CLI.
+- [ ] `src/lib/constants.ts` exports `REACTION_EMOJI` mapping all 5 `ReactionEmoji` values to their glyphs (👍 🔥 💪 🎉 👏) and `REACTION_EMOJI_ORDER` listing all 5 values in a fixed order.
+- [ ] `GET /api/activities/{id}/comments` returns comments for an existing activity with no auth required, ordered oldest-first by `createdAt`.
+- [ ] `GET /api/activities/{id}/comments` returns 404 for a nonexistent activity id.
+- [ ] `POST /api/activities/{id}/comments` without a session returns 401 and creates no comment.
+- [ ] `POST /api/activities/{id}/comments` with a session on a nonexistent activity id returns 404.
+- [ ] `POST /api/activities/{id}/comments` with an empty or whitespace-only body returns 400 and creates no comment.
+- [ ] `POST /api/activities/{id}/comments` with a body over 2000 characters returns 400 and creates no comment.
+- [ ] `POST /api/activities/{id}/comments` with a valid trimmed body ≤2000 characters and a session returns 201 with the serialized comment, owned by the session user, and the comment is persisted.
+- [ ] A logged-in user can successfully `POST` a comment on an activity owned by a different user (no ownership restriction on comment target).
+- [ ] `PATCH /api/comments/{id}` without a session returns 401.
+- [ ] `PATCH /api/comments/{id}` for a nonexistent comment id returns 404.
+- [ ] `PATCH /api/comments/{id}` by a user who does not own the comment returns 403 and does not modify the comment.
+- [ ] `PATCH /api/comments/{id}` with an empty/whitespace-only or >2000-char body returns 400.
+- [ ] `PATCH /api/comments/{id}` by the comment's owner with a valid body returns 200 with the updated serialized comment, and the change is persisted.
+- [ ] `DELETE /api/comments/{id}` without a session returns 401.
+- [ ] `DELETE /api/comments/{id}` for a nonexistent comment id returns 404.
+- [ ] `DELETE /api/comments/{id}` by a user who does not own the comment returns 403 and does not delete the comment.
+- [ ] `DELETE /api/comments/{id}` by the comment's owner returns 200 with `{ success: true }` and the comment is removed.
+- [ ] `POST /api/activities/{id}/reactions` without a session returns 401.
+- [ ] `POST /api/activities/{id}/reactions` for a nonexistent activity id returns 404.
+- [ ] `POST /api/activities/{id}/reactions` with an invalid `emoji` value returns 400.
+- [ ] `POST /api/activities/{id}/reactions` with a valid emoji and session creates a `Reaction` row and returns 201 (or 200) with `{ success: true }`.
+- [ ] Repeating the same `POST /api/activities/{id}/reactions` request (same activity, user, emoji) a second time does not error, creates no duplicate row, and returns a success response (200 or 201) with `{ success: true }`.
+- [ ] `DELETE /api/activities/{id}/reactions` without a session returns 401.
+- [ ] `DELETE /api/activities/{id}/reactions` with an invalid `emoji` value returns 400.
+- [ ] `DELETE /api/activities/{id}/reactions` removing an existing reaction returns 200 with `{ success: true }` and the row is removed.
+- [ ] `DELETE /api/activities/{id}/reactions` when no matching reaction row exists returns 200 with `{ success: true }` (not 404, not an error).
+- [ ] A single user can hold reactions with two or more distinct emoji simultaneously on the same activity, and removing one does not remove the others.
+- [ ] The database rejects (or the app prevents via the unique constraint) a second identical `(activityId, userId, emoji)` reaction row from existing at once.
+- [ ] `toPublicActivity()` called with only one argument (no `currentUserId`) still compiles and returns `reactions` as all 5 emoji with `count: 0, reactedByMe: false` and `commentCount: 0`, when the input lacks `reactions`/`_count` data.
+- [ ] `toPublicActivity()` called with a `currentUserId` and Prisma data including `reactions`/`_count.comments` returns accurate per-emoji counts, correct `reactedByMe` flags for that user, and the correct `commentCount`.
+- [ ] `src/app/page.tsx` renders activity cards whose reaction counts and comment counts reflect actual data in the database (verified via at least one activity with existing comments/reactions in a test scenario).
+- [ ] A logged-in visitor to `/` sees their own `reactedByMe` state correctly highlighted on activities they've reacted to.
+- [ ] A logged-out visitor to `/` sees accurate reaction counts and comment counts, with non-interactive reaction buttons (no click effect).
+- [ ] Every activity card (including one with zero reactions and zero comments) renders the footer with all 5 emoji buttons and a "0 comments" toggle — the footer is never hidden.
+- [ ] Expanding "N comments" on a card fetches and displays the full comment list in chronological ascending order.
+- [ ] A logged-in user can add a comment through the UI, and it appears in the expanded list without requiring a full page reload.
+- [ ] A logged-in user sees Edit/Delete affordances only on comments they authored, not on other users' comments.
+- [ ] Clicking "Delete" on a comment arms a "Confirm Delete" state without deleting; clicking "Confirm Delete" deletes it.
+- [ ] Deleting a manual activity that has at least one comment and one reaction succeeds (200 response) and removes the activity along with its comments and reactions, with no foreign-key error.
+- [ ] On a `source = "strava"` linkable card, clicking within the original card content (avatar/title/metadata) still opens the Strava activity URL in a new tab.
+- [ ] On a `source = "strava"` linkable card, clicking a reaction button or the comments toggle in the footer does not navigate to Strava.
+- [ ] Hovering anywhere over a card's full visual bounds (including the footer area) triggers the existing hover-lift/border-highlight effect.
+- [ ] No existing API route (`POST /api/activities`, `PATCH /api/activities/{id}`, `DELETE /api/activities/{id}`) changes its existing status codes or drops/renames any existing response field.
+- [ ] No new npm package appears in `package.json` as a result of this feature.
+
+## Regression Safety
+- [ ] `DashboardClient.tsx` continues to render `<ActivityCard activity={activity} canEdit={...} onEdit={openEdit} />` with no new props, and compiles/runs unchanged.
+- [ ] `ManualEntryModal.tsx`'s add/edit/delete flow for manual activities (`POST`/`PATCH`/`DELETE /api/activities[/:id]`) works exactly as before — unaffected by `toPublicActivity()`'s new optional parameter or the new `reactions`/`commentCount` fields.
+- [ ] `POST /api/activities` and `PATCH /api/activities/{id}` responses remain valid (callers that check only `res.ok` are unaffected by the additive `reactions`/`commentCount` fields).
+- [ ] `DELETE /api/activities/{id}` still returns 401/404/403 in the same existing cases (no session / activity not found / not manual or not owned) with no behavior change.
+- [ ] The activity feed's filtering (`PersonFilter`, `TypeFilter`) and grid layout (`grid grid-cols-1 gap-4 sm:grid-cols-2`) continue to work unchanged.
+- [ ] `src/lib/leaderboard.ts` and any leaderboard UI/aggregation are untouched and continue to function as before.
+- [ ] The "Link Feed Cards to Strava" behavior — whole-card click-through to Strava for linkable cards, hover-lift over the full card, grid-cell-filling card — still holds after the `ActivityCard.tsx` restructuring, even though the literal DOM nesting differs from that feature's original spec.
+- [ ] `src/app/api/activities/route.ts` and `src/app/api/activities/[id]/route.ts` remain unmodified in this feature (no code changes to these files).
+- [ ] Existing activities created before this migration (no comments/reactions) render correctly with 0 counts and an empty comment list, with no errors.
+
+## Open Questions Resolved
+- A person may hold multiple different-emoji reactions on the same activity simultaneously, but at most one of each emoji, enforced by the `(activityId, userId, emoji)` unique constraint.
+- A person can only add/remove their own reaction picks; there is no way, in the UI or API, to view a per-person breakdown or remove someone else's reaction.
+- Comments may be posted on any activity by any allowlisted logged-in member, regardless of who owns the activity — not restricted to "your own activities."
+- An existing session already implies allowlisted membership in this codebase (the allowlist check gates session creation in `src/lib/auth.ts`'s `signIn` callback) — new routes check only for a session via `getServerSession(authOptions)`, with no separate allowlist re-check.
+- Comment delete reuses the exact "Delete" → "Confirm Delete" button-swap pattern already shipped in `ManualEntryModal.tsx` (armed on first click, no request until the second click) rather than `window.confirm()` or single-click irreversible delete.
+- The footer (reaction row + "N comments" toggle) is always rendered on every card, including when there are zero reactions and zero comments.
+- `toPublicActivity()`'s new `currentUserId` parameter is optional and defensive specifically so `src/app/api/activities/route.ts` and `src/app/api/activities/[id]/route.ts` require zero code changes; only `src/app/page.tsx` needs the fuller query/argument.
+- Extending `PublicActivity` with two additive fields (`reactions`, `commentCount`) is treated as compatible with the "must not change any existing API route's contract" constraint, consistent with how the prior "Link Feed Cards to Strava" feature additively added `stravaActivityId` without being considered a contract break.
+- `GET /api/activities/[id]/comments` requires no authentication — comment (and reaction) visibility is fully public, matching the feed's existing public-viewable model; only `POST`/`PATCH`/`DELETE` require a session.
+- A `POST`/`DELETE` reaction request that collides with an already-existing/already-absent row is treated as an idempotent success, never an error — double-clicks or refresh races must never surface a spurious failure.
+- A maximum comment length of 2000 characters is enforced server-side in `POST`/`PATCH` comment routes (not specified by original requirements; this is the fixed default and must not be made user-configurable).
+- Reaction summaries and comment counts are fetched eagerly in `page.tsx`'s server-rendered query; full comment bodies/authors are fetched lazily only when a card's footer is expanded. Do not change this split (e.g. do not eagerly fetch full comment bodies into the initial page load).
+- No optimistic client-side state for reaction counts or comment lists beyond the local re-fetch described — every successful mutation relies on `router.refresh()` (page-level data) plus, for comments, an additional local re-fetch of the expanded list. Do not introduce a new client-side cache/state-management layer.
+- `ActivityCard.tsx`'s root structure is "outer `<div>` carries box styling and contains the `<a>`/content region plus the footer as true DOM siblings" — chosen deliberately over nesting interactive footer controls inside the `<a>` with `stopPropagation`/`preventDefault`, because native anchors do not reliably contain interactive form controls across browsers. Do not revert to nesting the footer inside the `<a>`.
+- `ActivityFooter` reads the current user via `useSession()` directly and does not receive it as a prop threaded through `ActivityCard`/`DashboardClient` — keep `ActivityCard`'s external prop signature unchanged.
+- When a visitor is not logged in, reaction buttons render as non-interactive (no click handler, no hover affordance) rather than disabled-with-tooltip or triggering a login prompt.
+- Edited comments show no "(edited)" indicator or distinct timestamp — `updatedAt` is stored but not surfaced in the UI.
+- Comments render oldest-first (chronological ascending); newly added comments append to the bottom of the expanded list.

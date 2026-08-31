@@ -17,6 +17,14 @@ enum ActivitySource {
   manual
 }
 
+enum ReactionEmoji {
+  THUMBS_UP
+  FIRE
+  MUSCLE
+  PARTY
+  CLAP
+}
+
 // Strava OAuth tokens (accessToken/refreshToken/tokenExpiresAt) live here and
 // are the single source of truth that all token-refresh logic reads/writes.
 // This app uses NextAuth's JWT session strategy (no database sessions), so
@@ -36,6 +44,8 @@ model User {
   updatedAt            DateTime          @updatedAt
 
   activities Activity[]
+  comments   Comment[]
+  reactions  Reaction[]
 }
 
 // Maintained by the app owner via direct DB edits (SQL client / Prisma
@@ -62,8 +72,36 @@ model Activity {
   createdAt          DateTime       @default(now())
   updatedAt          DateTime       @updatedAt
 
+  comments  Comment[]
+  reactions Reaction[]
+
   @@index([userId])
   @@index([startDate])
+}
+
+model Comment {
+  id         String   @id @default(cuid())
+  activityId String
+  activity   Activity @relation(fields: [activityId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User     @relation(fields: [userId], references: [id])
+  body       String
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([activityId])
+}
+
+model Reaction {
+  id         String        @id @default(cuid())
+  activityId String
+  activity   Activity      @relation(fields: [activityId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User          @relation(fields: [userId], references: [id])
+  emoji      ReactionEmoji
+  createdAt  DateTime      @default(now())
+
+  @@unique([activityId, userId, emoji])
 }
 
 // Write-only log of every raw incoming webhook payload, for debugging.

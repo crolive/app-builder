@@ -16,7 +16,7 @@ export default async function LeaderboardPage() {
     prisma.user.findMany({ orderBy: { firstName: "asc" } }),
   ]);
 
-  const activities = activityRows.map(toPublicActivity);
+  const activities = activityRows.map((a) => toPublicActivity(a));
   const users = userRows.map(toPublicUser);
   const timeZone = process.env.APP_TIMEZONE ?? "UTC";
 

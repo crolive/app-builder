@@ -1,4 +1,5 @@
-import type { Activity, ConnectionStatus, User } from "@prisma/client";
+import type { Activity, Comment, ConnectionStatus, Reaction, ReactionEmoji, User } from "@prisma/client";
+import { REACTION_EMOJI_ORDER } from "@/lib/constants";
 
 // Client-facing shapes. Deliberately omit accessToken/refreshToken/
 // tokenExpiresAt — those must never reach the browser (see Acceptance
@@ -10,6 +11,22 @@ export interface PublicUser {
   lastName: string;
   profilePhotoUrl: string | null;
   connectionStatus: ConnectionStatus;
+}
+
+export interface PublicReactionSummary {
+  emoji: ReactionEmoji;
+  count: number;
+  reactedByMe: boolean;
+}
+
+export interface PublicComment {
+  id: string;
+  activityId: string;
+  userId: string;
+  body: string;
+  createdAt: string;
+  updatedAt: string;
+  user: PublicUser;
 }
 
 export interface PublicActivity {
@@ -24,6 +41,8 @@ export interface PublicActivity {
   startDate: string;
   stravaActivityId: string | null;
   user: PublicUser;
+  reactions: PublicReactionSummary[];
+  commentCount: number;
 }
 
 export function toPublicUser(user: User): PublicUser {
@@ -36,7 +55,38 @@ export function toPublicUser(user: User): PublicUser {
   };
 }
 
-export function toPublicActivity(activity: Activity & { user: User }): PublicActivity {
+export function toPublicComment(comment: Comment & { user: User }): PublicComment {
+  return {
+    id: comment.id,
+    activityId: comment.activityId,
+    userId: comment.userId,
+    body: comment.body,
+    createdAt: comment.createdAt.toISOString(),
+    updatedAt: comment.updatedAt.toISOString(),
+    user: toPublicUser(comment.user),
+  };
+}
+
+export function toPublicActivity(
+  activity: Activity & {
+    user: User;
+    reactions?: Reaction[];
+    _count?: { comments?: number };
+  },
+  currentUserId?: string | null
+): PublicActivity {
+  const reactions: PublicReactionSummary[] = REACTION_EMOJI_ORDER.map((emoji) => {
+    if (!activity.reactions) {
+      return { emoji, count: 0, reactedByMe: false };
+    }
+    const matching = activity.reactions.filter((r) => r.emoji === emoji);
+    return {
+      emoji,
+      count: matching.length,
+      reactedByMe: currentUserId != null && matching.some((r) => r.userId === currentUserId),
+    };
+  });
+
   return {
     id: activity.id,
     userId: activity.userId,
@@ -49,5 +99,7 @@ export function toPublicActivity(activity: Activity & { user: User }): PublicAct
     startDate: activity.startDate.toISOString(),
     stravaActivityId: activity.stravaActivityId,
     user: toPublicUser(activity.user),
+    reactions,
+    commentCount: activity._count?.comments ?? 0,
   };
 }

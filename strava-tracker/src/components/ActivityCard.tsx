@@ -1,5 +1,6 @@
 import Avatar from "./Avatar";
 import Badge from "./Badge";
+import ActivityFooter from "./ActivityFooter";
 import {
   formatMiles,
   formatSecondsToDuration,
@@ -77,18 +78,21 @@ export default function ActivityCard({
     </>
   );
 
-  if (isLinkable) {
-    return (
-      <a
-        href={`https://www.strava.com/activities/${activity.stravaActivityId}`}
-        target="_blank"
-        rel="noopener noreferrer"
-        className={`${cardClassName} block cursor-pointer`}
-      >
-        {innerContent}
-      </a>
-    );
-  }
-
-  return <div className={cardClassName}>{innerContent}</div>;
+  return (
+    <div className={cardClassName}>
+      {isLinkable ? (
+        <a
+          href={`https://www.strava.com/activities/${activity.stravaActivityId}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="block cursor-pointer"
+        >
+          {innerContent}
+        </a>
+      ) : (
+        <div>{innerContent}</div>
+      )}
+      <ActivityFooter activity={activity} />
+    </div>
+  );
 }
