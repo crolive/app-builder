@@ -1,5 +1,4 @@
-import type { Activity, Comment, ConnectionStatus, Reaction, ReactionEmoji, User } from "@prisma/client";
-import { REACTION_EMOJI_ORDER } from "@/lib/constants";
+import type { Activity, Comment, ConnectionStatus, Reaction, User } from "@prisma/client";
 
 // Client-facing shapes. Deliberately omit accessToken/refreshToken/
 // tokenExpiresAt — those must never reach the browser (see Acceptance
@@ -11,12 +10,6 @@ export interface PublicUser {
   lastName: string;
   profilePhotoUrl: string | null;
   connectionStatus: ConnectionStatus;
-}
-
-export interface PublicReactionSummary {
-  emoji: ReactionEmoji;
-  count: number;
-  reactedByMe: boolean;
 }
 
 export interface PublicComment {
@@ -41,7 +34,8 @@ export interface PublicActivity {
   startDate: string;
   stravaActivityId: string | null;
   user: PublicUser;
-  reactions: PublicReactionSummary[];
+  reactionCount: number;
+  reactedByMe: boolean;
   commentCount: number;
 }
 
@@ -75,17 +69,7 @@ export function toPublicActivity(
   },
   currentUserId?: string | null
 ): PublicActivity {
-  const reactions: PublicReactionSummary[] = REACTION_EMOJI_ORDER.map((emoji) => {
-    if (!activity.reactions) {
-      return { emoji, count: 0, reactedByMe: false };
-    }
-    const matching = activity.reactions.filter((r) => r.emoji === emoji);
-    return {
-      emoji,
-      count: matching.length,
-      reactedByMe: currentUserId != null && matching.some((r) => r.userId === currentUserId),
-    };
-  });
+  const reactions = activity.reactions ?? [];
 
   return {
     id: activity.id,
@@ -99,7 +83,8 @@ export function toPublicActivity(
     startDate: activity.startDate.toISOString(),
     stravaActivityId: activity.stravaActivityId,
     user: toPublicUser(activity.user),
-    reactions,
+    reactionCount: reactions.length,
+    reactedByMe: currentUserId != null && reactions.some((r) => r.userId === currentUserId),
     commentCount: activity._count?.comments ?? 0,
   };
 }

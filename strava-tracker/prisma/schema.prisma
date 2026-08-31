@@ -17,14 +17,6 @@ enum ActivitySource {
   manual
 }
 
-enum ReactionEmoji {
-  THUMBS_UP
-  FIRE
-  MUSCLE
-  PARTY
-  CLAP
-}
-
 // Strava OAuth tokens (accessToken/refreshToken/tokenExpiresAt) live here and
 // are the single source of truth that all token-refresh logic reads/writes.
 // This app uses NextAuth's JWT session strategy (no database sessions), so
@@ -93,15 +85,14 @@ model Comment {
 }
 
 model Reaction {
-  id         String        @id @default(cuid())
+  id         String   @id @default(cuid())
   activityId String
-  activity   Activity      @relation(fields: [activityId], references: [id], onDelete: Cascade)
+  activity   Activity @relation(fields: [activityId], references: [id], onDelete: Cascade)
   userId     String
-  user       User          @relation(fields: [userId], references: [id])
-  emoji      ReactionEmoji
-  createdAt  DateTime      @default(now())
+  user       User     @relation(fields: [userId], references: [id])
+  createdAt  DateTime @default(now())
 
-  @@unique([activityId, userId, emoji])
+  @@unique([activityId, userId])
 }
 
 // Write-only log of every raw incoming webhook payload, for debugging.

@@ -3,12 +3,17 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { useSession } from "next-auth/react";
-import type { ReactionEmoji } from "@prisma/client";
 import Avatar from "./Avatar";
-import { REACTION_EMOJI, REACTION_EMOJI_ORDER } from "@/lib/constants";
+import { KUDOS_GLYPH } from "@/lib/constants";
 import type { PublicActivity, PublicComment } from "@/lib/serialize";
 
 const MAX_COMMENT_LENGTH = 2000;
+
+function formatCommentLabel(commentCount: number): string {
+  if (commentCount === 0) return "Comment";
+  if (commentCount === 1) return "1 Comment";
+  return `${commentCount} Comments`;
+}
 
 export default function ActivityFooter({ activity }: { activity: PublicActivity }) {
   const { data: session } = useSession();
@@ -52,12 +57,10 @@ export default function ActivityFooter({ activity }: { activity: PublicActivity 
     }
   }
 
-  async function toggleReaction(emoji: ReactionEmoji, reactedByMe: boolean) {
+  async function toggleReaction(reactedByMe: boolean) {
     if (!currentUserId) return;
     const res = await fetch(`/api/activities/${activity.id}/reactions`, {
       method: reactedByMe ? "DELETE" : "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ emoji }),
     });
     if (res.ok) {
       router.refresh();
@@ -136,37 +139,27 @@ export default function ActivityFooter({ activity }: { activity: PublicActivity 
   return (
     <div className="border-t border-border px-4 py-3">
       <div className="flex flex-wrap items-center gap-2">
-        {REACTION_EMOJI_ORDER.map((emoji) => {
-          const summary = activity.reactions.find((r) => r.emoji === emoji);
-          const count = summary?.count ?? 0;
-          const reactedByMe = summary?.reactedByMe ?? false;
-          const interactive = !!currentUserId;
-
-          return (
-            <button
-              key={emoji}
-              type="button"
-              onClick={interactive ? () => toggleReaction(emoji, reactedByMe) : undefined}
-              className={
-                reactedByMe
-                  ? "flex items-center gap-1 rounded-full border border-accent-positive bg-accent-positive/15 px-2.5 py-1 font-mono text-xs text-accent-positive"
-                  : `flex items-center gap-1 rounded-full border border-border-strong px-2.5 py-1 font-mono text-xs text-text-secondary ${
-                      interactive ? "cursor-pointer transition hover:border-accent-positive hover:text-accent-positive" : "cursor-default"
-                    }`
-              }
-            >
-              <span>{REACTION_EMOJI[emoji]}</span>
-              <span>{count}</span>
-            </button>
-          );
-        })}
+        <button
+          type="button"
+          onClick={currentUserId ? () => toggleReaction(activity.reactedByMe) : undefined}
+          className={
+            activity.reactedByMe
+              ? "flex items-center gap-1 rounded-full border border-accent-positive bg-accent-positive/15 px-2.5 py-1 font-mono text-xs text-accent-positive"
+              : `flex items-center gap-1 rounded-full border border-border-strong px-2.5 py-1 font-mono text-xs text-text-secondary ${
+                  currentUserId ? "cursor-pointer transition hover:border-accent-positive hover:text-accent-positive" : "cursor-default"
+                }`
+          }
+        >
+          <span>{KUDOS_GLYPH}</span>
+          {activity.reactionCount > 0 && <span>{activity.reactionCount}</span>}
+        </button>
 
         <button
           type="button"
           onClick={toggleExpanded}
           className="ml-auto rounded-full border border-border-strong px-3 py-1 font-mono text-[11px] uppercase tracking-widest text-text-secondary transition hover:border-accent-positive hover:text-accent-positive"
         >
-          {activity.commentCount} {activity.commentCount === 1 ? "Comment" : "Comments"}
+          {formatCommentLabel(activity.commentCount)}
         </button>
       </div>
 

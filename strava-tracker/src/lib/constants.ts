@@ -1,20 +1,4 @@
-import type { ReactionEmoji } from "@prisma/client";
-
-export const REACTION_EMOJI: Record<ReactionEmoji, string> = {
-  THUMBS_UP: "👍",
-  FIRE: "🔥",
-  MUSCLE: "💪",
-  PARTY: "🎉",
-  CLAP: "👏",
-};
-
-export const REACTION_EMOJI_ORDER: ReactionEmoji[] = [
-  "THUMBS_UP",
-  "FIRE",
-  "MUSCLE",
-  "PARTY",
-  "CLAP",
-];
+export const KUDOS_GLYPH = "👍";
 
 export const MANUAL_ACTIVITY_TYPES = [
   "Run",

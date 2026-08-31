@@ -1322,3 +1322,136 @@ Behavior:
 - When a visitor is not logged in, reaction buttons render as non-interactive (no click handler, no hover affordance) rather than disabled-with-tooltip or triggering a login prompt.
 - Edited comments show no "(edited)" indicator or distinct timestamp — `updatedAt` is stored but not surfaced in the UI.
 - Comments render oldest-first (chronological ascending); newly added comments append to the bottom of the expanded list.
+
+## Feature: Redo Comments/Reactions UI (added 2026-08-31)
+
+## Purpose
+The existing reaction UI on strava-tracker's activity feed cards offers a 5-emoji picker (👍 🔥 💪 🎉 👏), but this small invite-only group only ever uses reactions the way Strava's own "kudos" button works: a single acknowledgment, not a choice among five. This feature simplifies the reaction model to a single thumbs-up "kudos" toggle, matching Strava's own convention, and cleans up the comment-toggle label so it reads "COMMENT" at zero and "N COMMENT(S)" once there's activity, instead of always showing a count. Success is a simpler, more familiar interaction that removes unused reaction options and unnecessary visual noise (zero counts, a 5-button row) without touching the comment CRUD flow shipped in the prior feature.
+
+## Fits Into Existing System
+This is a data-model simplification layered on the comments-and-reactions feature shipped 2026-08-31 in strava-tracker, a Next.js 16 (App Router) / Prisma 5 + PostgreSQL (Neon) app. It touches:
+- `prisma/schema.prisma` — removes the `ReactionEmoji` enum and the `Reaction.emoji` field, narrows `@@unique([activityId, userId, emoji])` to `@@unique([activityId, userId])`, via a new `prisma migrate dev`-generated migration (the second non-`init` migration in the project).
+- `src/lib/constants.ts` — replaces `REACTION_EMOJI` (5-value lookup) and `REACTION_EMOJI_ORDER` (5-value render/validity-whitelist array) with a single kudos glyph string constant.
+- `src/lib/serialize.ts` — replaces `PublicReactionSummary`/`PublicActivity.reactions: PublicReactionSummary[]` with two scalar fields on `PublicActivity` (a kudos count and a reacted-by-me boolean), and updates `toPublicActivity`'s mapping logic accordingly.
+- `src/app/api/activities/[id]/reactions/route.ts` — POST/DELETE handlers stop reading/validating an `emoji` body field and become a body-less toggle-add / toggle-remove of the current user's kudos row; existing auth (401), not-found (404), and idempotency (P2002 catch on POST, no-op `deleteMany` on DELETE) behavior is preserved.
+- `src/components/ActivityFooter.tsx` — the reaction-button render block (currently a `.map()` over `REACTION_EMOJI_ORDER`) becomes a single kudos button; the comment-toggle button's label becomes computed display text. The comment expand/collapse/add/edit/delete UI beneath it is untouched.
+- `src/components/ActivityCard.tsx` and `src/app/page.tsx` are expected to need no changes (or only pass-through-safe touch-ups) — `ActivityCard`'s external prop signature (`activity`, `canEdit`, `onEdit`) and `page.tsx`'s Prisma `include: { reactions: true }` clause are not touched by this feature; only the internal shape of `PublicActivity.reactions` changes, and both consume it opaquely.
+
+Conventions this feature must follow: `getServerSession(authOptions)` → 401 on unauthenticated write; `findUnique` → 404 on missing activity; JSON body responses (never 204); no `window.confirm()`; Prisma CLI-generated migrations only (`prisma migrate dev`); dark theme with `font-mono uppercase tracking-widest` labels and `accent-positive`/`accent-alert` color tokens; existing reacted/not-reacted button styling (accent-positive border+bg+text when reacted, border-border-strong/text-secondary with hover accent when interactive-but-not-reacted, cursor-default when not logged in).
+
+## Tech Stack & Constraints
+- Next.js 16 (App Router), React 19, TypeScript, Prisma 5 + PostgreSQL (Neon), NextAuth.js (Strava OAuth), Tailwind CSS dark theme.
+- No new npm dependency may be added.
+- No automated test suite exists for this project; manual QA against this spec's Acceptance Criteria is the norm — do not add a new test framework or test files.
+- Schema changes must go through `prisma migrate dev` (CLI-generated migration file under `prisma/migrations/`), not a hand-written SQL file or `db push`.
+- `ActivityCard.tsx`'s external prop signature (`activity`, `canEdit`, `onEdit`) must not change.
+- `DashboardClient.tsx`'s prop signature must not change.
+- `page.tsx`'s Prisma `include` clause (`reactions: true`, `_count: { select: { comments: true } }`) must not change.
+- No other existing API route's contract (activities CRUD, comments CRUD) may change.
+- Existing auth/error-handling conventions (401/404, JSON-only responses, no `window.confirm()`) must be preserved in the reactions route.
+- No migration/backfill logic for existing FIRE/MUSCLE/PARTY/CLAP reaction rows — none exist in production; this is a clean schema cutover.
+
+## Non-Goals
+- No change to comment CRUD behavior, auth gating, or the add/edit/delete/expand-collapse flow already shipped in `ActivityFooter.tsx`.
+- No reaction type beyond a single thumbs-up — no alternate single emoji, no long-press/affinity picker for additional reaction options.
+- No migration or preservation of existing non-thumbs-up reaction rows (FIRE/MUSCLE/PARTY/CLAP).
+- No display of who reacted (avatars/names on hover, etc.) — counts only.
+- No new npm dependency.
+- No change to `DashboardClient.tsx`'s prop signature or `ActivityCard.tsx`'s external prop signature beyond what's structurally required to pass the simplified reaction data through `PublicActivity`.
+- No change to any other existing API route's contract (activities CRUD, comments CRUD).
+- No change to the leaderboard.
+- No new automated test suite.
+
+## Core Behavior
+1. **Kudos toggle — authenticated user, not yet reacted.** User clicks the kudos button on an activity card they have not reacted to. System POSTs to `/api/activities/[id]/reactions` (no `emoji` field in the body), creates a `Reaction` row for `(activityId, userId)`, then the client calls `router.refresh()`. Outcome: the button switches to its reacted/highlighted (`accent-positive`) visual state and the kudos count increments by one (going from hidden to "1" if it was previously zero).
+2. **Kudos toggle — authenticated user, already reacted.** User clicks the kudos button on an activity card they have already reacted to. System DELETEs the user's `Reaction` row for that activity, then the client calls `router.refresh()`. Outcome: the button returns to its non-reacted visual state and the kudos count decrements by one (hidden again if it reaches zero).
+3. **Kudos toggle idempotency — duplicate add.** If a POST is made for a `(activityId, userId)` pair that already has a `Reaction` row (e.g. a race or double-click), the system catches the Prisma P2002 unique-constraint violation and returns success (200) rather than erroring, with no duplicate row created.
+4. **Kudos toggle idempotency — duplicate remove.** If a DELETE is made for a `(activityId, userId)` pair that has no `Reaction` row, the `deleteMany` no-ops and the system returns success (200) rather than erroring.
+5. **Kudos toggle — unauthenticated request.** If POST or DELETE is called without a valid session, the system returns 401 and makes no database change.
+6. **Kudos toggle — activity not found.** If POST is called with an `id` that does not correspond to an existing activity, the system returns 404 and makes no database change. (DELETE preserves its existing no-op-on-missing-row idempotent behavior per item 4; it is not required to 404 on a missing activity.)
+7. **Kudos button — logged-out viewer.** A user without a session sees the kudos button rendered (glyph, and count if ≥ 1) but it is visually non-interactive (e.g. `cursor-default`, no hover-accent affordance) and clicking it performs no action (no request is sent).
+8. **Kudos count display — zero state.** When an activity's kudos count is 0, no numeric count is rendered next to the glyph (glyph only).
+9. **Kudos count display — nonzero state.** When an activity's kudos count is ≥ 1, the numeric count is rendered next to the glyph.
+10. **Comment label — zero comments.** When `commentCount === 0`, the comment-toggle button displays "COMMENT" (rendered through the existing `font-mono uppercase tracking-widest` class, no numeral).
+11. **Comment label — exactly one comment.** When `commentCount === 1`, the comment-toggle button displays "1 COMMENT" (singular).
+12. **Comment label — multiple comments.** When `commentCount > 1`, the comment-toggle button displays "N COMMENTS" (plural), where N is the exact count.
+13. **Comment toggle behavior unchanged.** Clicking the comment-toggle button still expands/collapses the comment thread exactly as before this feature; only the button's label text logic changes.
+14. **Existing card layout preserved.** `ActivityCard.tsx` continues to render `ActivityFooter` as a DOM sibling of the card's clickable link/content region, preserving whole-card click-to-Strava navigation and hover-lift, unaffected by the internal reaction-shape change.
+
+## Data Model
+- **Removed**: `enum ReactionEmoji { THUMBS_UP FIRE MUSCLE PARTY CLAP }` from `prisma/schema.prisma`.
+- **Changed**: `model Reaction` drops its `emoji ReactionEmoji` field entirely. Remaining fields: `id`, `activityId`, `activity` (relation), `userId`, `user` (relation), `createdAt`. The row's mere existence for a given `(activityId, userId)` pair represents that user's kudos on that activity — a presence/boolean model, not a value-typed choice.
+- **Changed**: `@@unique([activityId, userId, emoji])` becomes `@@unique([activityId, userId])` on `Reaction`.
+- **Migration**: a new `prisma migrate dev`-generated migration file is added under `prisma/migrations/`, dropping the `emoji` column and the `ReactionEmoji` enum type and altering the unique constraint accordingly. No data-preservation/backfill step is included — the migration is a clean cutover under the resolved assumption that no production `Reaction` rows exist yet.
+- **Changed (`src/lib/serialize.ts`)**: `PublicReactionSummary` type is removed. `PublicActivity.reactions: PublicReactionSummary[]` is replaced by two scalar fields directly on `PublicActivity`: a kudos count (integer) and a reacted-by-me flag (boolean). Field names are the developer's choice, consistent with existing `serialize.ts` naming conventions (e.g. `reactionCount` and `reactedByMe`), but must be used consistently across `serialize.ts`, `ActivityFooter.tsx`, and any other consumer.
+- **Changed (`src/lib/constants.ts`)**: `REACTION_EMOJI` (5-entry lookup) and `REACTION_EMOJI_ORDER` (5-entry array) are removed, replaced by a single exported string constant holding the kudos glyph "👍".
+
+## Interface / API
+- **`POST /api/activities/[id]/reactions`**
+  - Auth: requires a valid session (`getServerSession(authOptions)`); returns 401 JSON error if absent.
+  - Existence: 404 JSON error if the activity `id` does not exist.
+  - Body: no `emoji` field is read or validated (the `isValidEmoji` helper and its `REACTION_EMOJI_ORDER`-based whitelist are removed). The endpoint is effectively body-less — creates a `Reaction` row for `(activityId, currentUserId)`.
+  - Idempotency: on a P2002 unique-constraint violation (row already exists), catches the error and returns 200 JSON success rather than erroring.
+  - Response: JSON body (never 204), consistent with existing route conventions.
+- **`DELETE /api/activities/[id]/reactions`**
+  - Auth: requires a valid session; returns 401 JSON error if absent.
+  - Body: no `emoji` field is read or validated.
+  - Behavior: `deleteMany` removes the `Reaction` row for `(activityId, currentUserId)`; no-ops (still 200) if no such row exists.
+  - Response: JSON body (never 204).
+- **`ActivityFooter.tsx` client behavior**:
+  - `toggleReaction(reactedByMe: boolean)` (updated signature, no `emoji` parameter) — POSTs when `reactedByMe` is false, DELETEs when true, then calls `router.refresh()`, matching today's post-action refresh pattern.
+  - Renders a single kudos button (glyph from the new `constants.ts` string constant) instead of `.map()`-ing over 5 buttons.
+  - Renders the comment-toggle button's label via a pure display-time string function of `commentCount`: `0 → "COMMENT"`, `1 → "1 COMMENT"`, `N>1 → "N COMMENTS"`.
+- No changes to any other route, to `ActivityCard.tsx`'s props, to `DashboardClient.tsx`'s props, or to `page.tsx`'s Prisma query shape.
+
+## Acceptance Criteria
+- [ ] `prisma/schema.prisma` no longer defines a `ReactionEmoji` enum.
+- [ ] `prisma/schema.prisma`'s `Reaction` model no longer has an `emoji` field.
+- [ ] `prisma/schema.prisma`'s `Reaction` model has `@@unique([activityId, userId])` (not including `emoji`).
+- [ ] A new migration file exists under `prisma/migrations/` (generated via `prisma migrate dev`) that drops the `emoji` column/enum and updates the unique constraint, and it applies cleanly against a fresh database.
+- [ ] `src/lib/constants.ts` no longer exports `REACTION_EMOJI` or `REACTION_EMOJI_ORDER`; it exports a single string constant for the kudos glyph "👍".
+- [ ] `src/lib/serialize.ts` no longer exports `PublicReactionSummary`; `PublicActivity` has scalar kudos-count and reacted-by-me fields instead of a `reactions` array.
+- [ ] `toPublicActivity` correctly computes the kudos count and reacted-by-me flag from the `Reaction[]` relation for a given activity and current user.
+- [ ] `POST /api/activities/[id]/reactions` no longer reads or validates an `emoji` body field.
+- [ ] `POST /api/activities/[id]/reactions` without a session returns 401 and creates no row.
+- [ ] `POST /api/activities/[id]/reactions` for a nonexistent activity id returns 404 and creates no row.
+- [ ] `POST /api/activities/[id]/reactions` called twice in a row by the same user on the same activity does not error and does not create a duplicate row (P2002 idempotency preserved).
+- [ ] `DELETE /api/activities/[id]/reactions` without a session returns 401.
+- [ ] `DELETE /api/activities/[id]/reactions` called when no reaction row exists for that user/activity does not error and returns success (idempotent no-op).
+- [ ] Neither `POST` nor `DELETE` on the reactions route ever returns a 204 response.
+- [ ] `ActivityFooter.tsx` renders exactly one kudos button per activity card (not five).
+- [ ] Clicking the kudos button as a logged-in user who has not reacted adds a kudos (persists after reload) and visually switches the button to its reacted/highlighted state.
+- [ ] Clicking the kudos button as a logged-in user who has already reacted removes the kudos (persists after reload) and visually switches the button back to its non-reacted state.
+- [ ] When an activity's kudos count is 0, no numeral is displayed next to the kudos glyph.
+- [ ] When an activity's kudos count is ≥ 1, the numeral is displayed next to the kudos glyph and matches the actual count.
+- [ ] A logged-out viewer sees the kudos button rendered (glyph, plus count if ≥ 1) but clicking it triggers no network request and no state change.
+- [ ] When `commentCount` is 0, the comment-toggle button displays exactly "COMMENT" (case per existing CSS transform).
+- [ ] When `commentCount` is 1, the comment-toggle button displays exactly "1 COMMENT".
+- [ ] When `commentCount` is greater than 1, the comment-toggle button displays exactly "N COMMENTS" where N equals the actual comment count.
+- [ ] Clicking the comment-toggle button still expands/collapses the comment thread as before this feature, regardless of the label text.
+- [ ] The comment add/edit/delete flow beneath the toggle functions identically to before this feature (unchanged by this spec).
+- [ ] `ActivityCard.tsx`'s exported prop signature (`activity`, `canEdit`, `onEdit`) is unchanged from before this feature.
+- [ ] `DashboardClient.tsx`'s prop signature is unchanged from before this feature.
+- [ ] `page.tsx`'s Prisma `findMany` `include` clause (`reactions: true`, `_count: { select: { comments: true } }`) is unchanged from before this feature.
+- [ ] Whole-card click-to-Strava navigation and hover-lift behavior on `ActivityCard` still work unchanged.
+- [ ] The project builds/type-checks with no references remaining to `ReactionEmoji`, `REACTION_EMOJI`, `REACTION_EMOJI_ORDER`, or `PublicReactionSummary` anywhere in `src/`.
+- [ ] No new npm dependency has been added (`package.json` dependencies are unchanged apart from any Prisma-generated-client version bump inherent to running a migration).
+
+## Regression Safety
+- [ ] Comment add, edit, and delete (with the existing Delete → Confirm Delete pattern, no `window.confirm()`) continue to work exactly as before this feature.
+- [ ] Comment thread expand/collapse continues to work exactly as before this feature.
+- [ ] Auth gating on comment actions (401 for unauthenticated writes) is unchanged.
+- [ ] The activities API route(s) unrelated to reactions (activity CRUD) are unaffected — same request/response contracts as before.
+- [ ] The comments API route(s) are unaffected — same request/response contracts as before.
+- [ ] The leaderboard is unaffected by this feature.
+- [ ] `page.tsx`'s server-side data fetch (`prisma.activity.findMany` with its existing `include`) continues to return data that renders correctly on the dashboard.
+- [ ] Dark theme styling conventions (`font-mono uppercase tracking-widest` labels, `accent-positive`/`accent-alert` tokens) are visually consistent with the rest of the app on the redone kudos button and comment label.
+
+## Open Questions Resolved
+- The reaction schema is simplified to a boolean-presence kudos model (enum and `emoji` field removed, unique constraint narrowed to `[activityId, userId]`) — do not implement this as a trimmed 1-value enum instead.
+- Do not write any migration/backfill logic for existing FIRE/MUSCLE/PARTY/CLAP rows — none exist in production, so a normal `prisma migrate dev` clean-cutover migration is sufficient and correct.
+- The reaction API route's contract changes only insofar as `emoji` is no longer read or validated; all other behavior (auth, not-found, idempotency, response codes, JSON-only responses) carries over unchanged — do not otherwise redesign the route.
+- Do not change `ActivityCard.tsx`'s external prop signature (`activity`, `canEdit`, `onEdit`) or `DashboardClient.tsx`'s prop signature — both already pass `PublicActivity` through opaquely, so the internal shape change does not need to ripple outward.
+- Comment count formatting is implemented entirely client-side in `ActivityFooter.tsx` from the existing `commentCount` field — do not add any API or schema change for the comment-label change.
+- Field names for the new scalar kudos fields on `PublicActivity` (replacing `PublicReactionSummary[]`) are the developer's choice, but must be applied consistently across `serialize.ts` and all consumers (e.g. `ActivityFooter.tsx`) — do not leave mismatched or duplicate naming for the same concept.
+- Do not add any new npm dependency to implement the single-button kudos UI or the label formatting — both are achievable with existing stack primitives (React state/props, Tailwind classes already in use).
